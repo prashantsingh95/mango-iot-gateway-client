@@ -1,0 +1,109 @@
+# Mango IoT Gateway Agent Configuration
+# All fields documented with defaults.
+# Path: /opt/gateway/config.yml or set GATEWAY_CONFIG env var.
+
+gateway:
+  device_id: ""                    # Auto from MAC if empty
+  name: "Raspberry Pi Gateway"
+  serial_number: ""                # Auto from /proc/cpuinfo if empty
+  tenant_id: "default"
+  provision_token: ""              # Set for auto-registration
+
+mqtt:
+  broker_url: "mqtt://localhost:1883"
+  username: ""                     # Leave empty for anonymous
+  password: ""
+  client_id_prefix: "gw"
+  ssl: false
+  ca_cert: ""                      # Path to CA cert for TLS
+  client_cert: ""                  # Path to client cert for TLS
+  client_key: ""                   # Path to client key for TLS
+  qos: 1
+  keep_alive: 60
+  clean_session: true
+  reconnect_delay: 5
+  max_reconnect_delay: 60
+  topics:
+    telemetry: "gateway/{device_id}/telemetry"
+    status: "gateway/{device_id}/status"
+    log: "gateway/{device_id}/log"
+    command: "gateway/{device_id}/command/set"
+
+modbus:
+  enabled: false
+  devices:
+    # - name: "power-meter"
+    #   protocol: "tcp"            # tcp or rtu
+    #   address: "192.168.1.100:502"
+    #   slave_id: 1
+    #   baud_rate: 9600            # RTU only
+    #   data_bits: 8               # RTU only
+    #   stop_bits: 1               # RTU only
+    #   parity: "N"                # RTU only: N, E, O
+    #   interval: 10               # Poll interval in seconds
+    #   registers:
+    #     - name: "voltage"
+    #       address: 0
+    #       quantity: 2
+    #       type: "float32"        # float32, int16, uint16, uint32, int32, bool, holding
+    #     - name: "current"
+    #       address: 2
+    #       quantity: 2
+    #       type: "float32"
+
+gpio:
+  enabled: false
+  sensors:
+    # - name: "relay-1"
+    #   pin: 17
+    #   mode: "output"             # input or output
+    #   pull: "down"               # input only: up, down, none
+    #   interval: 5
+    #   default: false
+
+monitoring:
+  interval: 30                     # Seconds between telemetry publish
+  cpu: true
+  memory: true
+  disk: true
+  temperature: true
+  network: true
+  disk_threshold_warn: 90          # Percent
+  memory_threshold_warn: 90
+  cpu_threshold_warn: 90
+  temp_threshold_warn: 80          # Celsius
+
+logging:
+  level: "info"                    # debug, info, warn, error
+  file: "/var/log/gateway-agent.log"
+  max_size: 10                     # MB before rotation
+  max_backups: 7
+  remote: true                     # Send logs to cloud via MQTT
+
+ota:
+  enabled: true
+  firmware_dir: "/opt/gateway/firmware"
+  backup_dir: "/opt/gateway/backup"
+  auto_rollback: true
+  rollback_timeout: 30             # Seconds to wait before rollback
+
+watchdog:
+  enabled: true
+  interval: 60                     # Seconds between health checks
+  max_missed_pings: 3
+  action: "restart"                # restart, reboot, or custom command
+
+commands:
+  enabled: true
+  allowed:
+    - "reboot"
+    - "restart_agent"
+    - "run_shell"
+    - "update_firmware"
+    - "set_relay"
+    - "read_register"
+  shell:
+    allowed_paths:
+      - "/opt/gateway/scripts/"
+      - "/usr/local/bin/"
+    timeout: 30                    # Seconds before shell command timeout

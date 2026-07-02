@@ -1,0 +1,19 @@
+# Binaries
+gateway-agent
+gateway-agent-*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Local overrides (not the template)
+/config.local.yml

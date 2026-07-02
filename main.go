@@ -1,0 +1,1212 @@
+package main
+
+import (
+	"bufio"
+	"context"
+	"crypto/md5"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/json"
+	"fmt"
+	"io"
+	"math"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"os/signal"
+	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	MQTT "github.com/eclipse/paho.mqtt.golang"
+	"github.com/goburrow/modbus"
+	psCPU "github.com/shirou/gopsutil/v3/cpu"
+	psDisk "github.com/shirou/gopsutil/v3/disk"
+	psHost "github.com/shirou/gopsutil/v3/host"
+	psLoad "github.com/shirou/gopsutil/v3/load"
+	psMem "github.com/shirou/gopsutil/v3/mem"
+	psNet "github.com/shirou/gopsutil/v3/net"
+	"github.com/sirupsen/logrus"
+	"gopkg.in/yaml.v3"
+)
+
+// ---------- Configuration ----------
+
+type MQTTTopicConfig struct {
+	Telemetry string `yaml:"telemetry"`
+	Status    string `yaml:"status"`
+	Log       string `yaml:"log"`
+	Command   string `yaml:"command"`
+}
+
+type MQTTConfig struct {
+	BrokerURL          string          `yaml:"broker_url"`
+	Username           string          `yaml:"username"`
+	Password           string          `yaml:"password"`
+	ClientIDPrefix     string          `yaml:"client_id_prefix"`
+	SSL                bool            `yaml:"ssl"`
+	CACert             string          `yaml:"ca_cert"`
+	ClientCert         string          `yaml:"client_cert"`
+	ClientKey          string          `yaml:"client_key"`
+	QoS                byte            `yaml:"qos"`
+	KeepAlive          int             `yaml:"keep_alive"`
+	CleanSession       bool            `yaml:"clean_session"`
+	ReconnectDelay     int             `yaml:"reconnect_delay"`
+	MaxReconnectDelay  int             `yaml:"max_reconnect_delay"`
+	Topics             MQTTTopicConfig `yaml:"topics"`
+}
+
+type ModbusRegister struct {
+	Name     string `yaml:"name"`
+	Address  uint16 `yaml:"address"`
+	Quantity uint16 `yaml:"quantity"`
+	Type     string `yaml:"type"`
+}
+
+type ModbusDevice struct {
+	Name      string            `yaml:"name"`
+	Protocol  string            `yaml:"protocol"`
+	Address   string            `yaml:"address"`
+	SlaveID   byte              `yaml:"slave_id"`
+	BaudRate  int               `yaml:"baud_rate"`
+	DataBits  int               `yaml:"data_bits"`
+	StopBits  int               `yaml:"stop_bits"`
+	Parity    string            `yaml:"parity"`
+	Interval  int               `yaml:"interval"`
+	Registers []ModbusRegister  `yaml:"registers"`
+}
+
+type ModbusConfig struct {
+	Enabled bool            `yaml:"enabled"`
+	Devices []ModbusDevice  `yaml:"devices"`
+}
+
+type GPIOSensor struct {
+	Name     string `yaml:"name"`
+	Pin      int    `yaml:"pin"`
+	Mode     string `yaml:"mode"`
+	Pull     string `yaml:"pull"`
+	Interval int    `yaml:"interval"`
+	Default  bool   `yaml:"default"`
+}
+
+type GPIOConfig struct {
+	Enabled bool         `yaml:"enabled"`
+	Sensors []GPIOSensor `yaml:"sensors"`
+}
+
+type MonitorConfig struct {
+	Interval          int    `yaml:"interval"`
+	CPU               bool   `yaml:"cpu"`
+	Memory            bool   `yaml:"memory"`
+	Disk              bool   `yaml:"disk"`
+	Temperature       bool   `yaml:"temperature"`
+	Network           bool   `yaml:"network"`
+	DiskThresholdWarn int    `yaml:"disk_threshold_warn"`
+	MemoryThresholdWarn int  `yaml:"memory_threshold_warn"`
+	CPUThresholdWarn    int   `yaml:"cpu_threshold_warn"`
+	TempThresholdWarn   int   `yaml:"temp_threshold_warn"`
+}
+
+type LogConfig struct {
+	Level      string `yaml:"level"`
+	File       string `yaml:"file"`
+	MaxSize    int    `yaml:"max_size"`
+	MaxBackups int    `yaml:"max_backups"`
+	Remote     bool   `yaml:"remote"`
+}
+
+type OTAConfig struct {
+	Enabled         bool   `yaml:"enabled"`
+	FirmwareDir     string `yaml:"firmware_dir"`
+	BackupDir       string `yaml:"backup_dir"`
+	AutoRollback    bool   `yaml:"auto_rollback"`
+	RollbackTimeout int    `yaml:"rollback_timeout"`
+}
+
+type WatchdogConfig struct {
+	Enabled        bool `yaml:"enabled"`
+	Interval       int  `yaml:"interval"`
+	MaxMissedPings int  `yaml:"max_missed_pings"`
+	Action         string `yaml:"action"`
+}
+
+type ShellCommandConfig struct {
+	AllowedPaths []string `yaml:"allowed_paths"`
+	Timeout      int      `yaml:"timeout"`
+}
+
+type CommandsConfig struct {
+	Enabled bool                `yaml:"enabled"`
+	Allowed []string            `yaml:"allowed"`
+	Shell   ShellCommandConfig  `yaml:"shell"`
+}
+
+type GatewayConfig struct {
+	DeviceID      string `yaml:"device_id"`
+	Name          string `yaml:"name"`
+	SerialNumber  string `yaml:"serial_number"`
+	TenantID      string `yaml:"tenant_id"`
+	ProvisionToken string `yaml:"provision_token"`
+}
+
+type Config struct {
+	Gateway    GatewayConfig     `yaml:"gateway"`
+	MQTT       MQTTConfig        `yaml:"mqtt"`
+	Modbus     ModbusConfig      `yaml:"modbus"`
+	GPIO       GPIOConfig        `yaml:"gpio"`
+	Monitoring MonitorConfig     `yaml:"monitoring"`
+	Logging    LogConfig         `yaml:"logging"`
+	OTA        OTAConfig         `yaml:"ota"`
+	Watchdog   WatchdogConfig    `yaml:"watchdog"`
+	Commands   CommandsConfig    `yaml:"commands"`
+}
+
+// ---------- State ----------
+
+type AgentState struct {
+	mu            sync.RWMutex
+	DeviceID      string            `json:"device_id"`
+	Connected     bool              `json:"connected"`
+	Uptime        int64             `json:"uptime"`
+	FirmwareVersion string          `json:"firmware_version"`
+	LastTelemetry time.Time         `json:"last_telemetry"`
+	LastHeartbeat time.Time         `json:"last_heartbeat"`
+}
+
+type ModbusValue struct {
+	Name  string      `json:"name"`
+	Value interface{} `json:"value"`
+	Unit  string      `json:"unit,omitempty"`
+	Time  time.Time   `json:"time"`
+}
+
+type TelemetryData struct {
+	DeviceID  string                 `json:"device_id"`
+	Timestamp string                 `json:"timestamp"`
+	System    map[string]interface{} `json:"system,omitempty"`
+	Modbus    []ModbusValue          `json:"modbus,omitempty"`
+	GPIO      map[string]interface{} `json:"gpio,omitempty"`
+}
+
+type StatusData struct {
+	DeviceID    string `json:"device_id"`
+	Status      string `json:"status"`
+	Uptime      int64  `json:"uptime"`
+	Version     string `json:"version"`
+	IP          string `json:"ip"`
+	LastSeen    string `json:"last_seen"`
+	FirmwareVer string `json:"firmware_version"`
+}
+
+type CommandRequest struct {
+	ID      string          `json:"id"`
+	Type    string          `json:"type"`
+	Payload json.RawMessage `json:"payload"`
+}
+
+type CommandResponse struct {
+	ID        string      `json:"id"`
+	Status    string      `json:"status"`
+	Result    interface{} `json:"result,omitempty"`
+	Error     string      `json:"error,omitempty"`
+	Timestamp string      `json:"timestamp"`
+}
+
+// ---------- Globals ----------
+
+var (
+	cfg         Config
+	state       AgentState
+	mqttClient  MQTT.Client
+	modbusPools = make(map[string]*modbusHandler)
+	logger      = logrus.New()
+	startTime   = time.Now()
+	version     = "1.0.0"
+)
+
+// ---------- Modbus Handler ----------
+
+type modbusHandler struct {
+	name     string
+	device   ModbusDevice
+	handler  modbus.ClientHandler
+	client   modbus.Client
+}
+
+func newModbusHandler(dev ModbusDevice) (*modbusHandler, error) {
+	mh := &modbusHandler{name: dev.Name, device: dev}
+
+	switch dev.Protocol {
+	case "tcp":
+		handler := modbus.NewTCPClientHandler(dev.Address)
+		handler.Timeout = 10 * time.Second
+		handler.SlaveId = dev.SlaveID
+		if err := handler.Connect(); err != nil {
+			return nil, fmt.Errorf("modbus tcp connect %s: %w", dev.Address, err)
+		}
+		mh.handler = handler
+		mh.client = modbus.NewClient(handler)
+	case "rtu":
+		handler := modbus.NewRTUClientHandler(dev.Address)
+		handler.BaudRate = dev.BaudRate
+		handler.DataBits = dev.DataBits
+		handler.StopBits = dev.StopBits
+		handler.Parity = dev.Parity
+		handler.Timeout = 5 * time.Second
+		handler.SlaveId = dev.SlaveID
+		if err := handler.Connect(); err != nil {
+			return nil, fmt.Errorf("modbus rtu connect %s: %w", dev.Address, err)
+		}
+		mh.handler = handler
+		mh.client = modbus.NewClient(handler)
+	default:
+		return nil, fmt.Errorf("unsupported modbus protocol: %s", dev.Protocol)
+	}
+	return mh, nil
+}
+
+func (mh *modbusHandler) readRegisters() []ModbusValue {
+	var results []ModbusValue
+	for _, reg := range mh.device.Registers {
+		val, err := mh.readRegister(reg)
+		if err != nil {
+			logger.WithError(err).WithField("register", reg.Name).Warn("modbus read failed")
+			continue
+		}
+		results = append(results, val)
+	}
+	return results
+}
+
+func (mh *modbusHandler) readRegister(reg ModbusRegister) (ModbusValue, error) {
+	mv := ModbusValue{Name: reg.Name, Time: time.Now()}
+
+	var raw []byte
+	var err error
+
+	switch reg.Type {
+	case "coil":
+		raw = []byte{0}
+		if reg.Quantity == 1 {
+			v, err := mh.client.ReadCoils(reg.Address, 1)
+			if err != nil {
+				return mv, err
+			}
+			raw = v
+		}
+	case "discrete":
+		v, err := mh.client.ReadDiscreteInputs(reg.Address, reg.Quantity)
+		if err != nil {
+			return mv, err
+		}
+		raw = v
+	case "holding":
+		v, err := mh.client.ReadHoldingRegisters(reg.Address, reg.Quantity)
+		if err != nil {
+			return mv, err
+		}
+		raw = v
+	case "input":
+		v, err := mh.client.ReadInputRegisters(reg.Address, reg.Quantity)
+		if err != nil {
+			return mv, err
+		}
+		raw = v
+	default:
+		// Default: read holding registers
+		v, err := mh.client.ReadHoldingRegisters(reg.Address, reg.Quantity)
+		if err != nil {
+			return mv, err
+		}
+		raw = v
+	}
+
+	switch reg.Type {
+	case "float32":
+		if len(raw) >= 4 {
+			mv.Value = math.Float32frombits(
+				(uint32(raw[0]) << 8) | uint32(raw[1])<<0 |
+				(uint32(raw[2]) << 24) | uint32(raw[3])<<16,
+			)
+		}
+	case "int16":
+		if len(raw) >= 2 {
+			v := int16(raw[0])<<8 | int16(raw[1])
+			mv.Value = v
+		}
+	case "uint16":
+		if len(raw) >= 2 {
+			mv.Value = uint16(raw[0])<<8 | uint16(raw[1])
+		}
+	case "uint32":
+		if len(raw) >= 4 {
+			mv.Value = uint32(raw[0])<<24 | uint32(raw[1])<<16 | uint32(raw[2])<<8 | uint32(raw[3])
+		}
+	case "int32":
+		if len(raw) >= 4 {
+			mv.Value = int32(raw[0])<<24 | int32(raw[1])<<16 | int32(raw[2])<<8 | int32(raw[3])
+		}
+	case "bool":
+		if len(raw) >= 1 {
+			mv.Value = raw[0] != 0
+		}
+	default:
+		mv.Value = raw
+	}
+
+	return mv, nil
+}
+
+func (mh *modbusHandler) close() {
+	if closer, ok := mh.handler.(io.Closer); ok {
+		closer.Close()
+	}
+}
+
+// ---------- MQTT ----------
+
+func mqttConnect() error {
+	deviceID := getDeviceID()
+
+	opts := MQTT.NewClientOptions()
+	opts.AddBroker(cfg.MQTT.BrokerURL)
+	opts.SetClientID(fmt.Sprintf("%s_%s_%d", cfg.MQTT.ClientIDPrefix, deviceID, time.Now().Unix()%10000))
+	opts.SetCleanSession(cfg.MQTT.CleanSession)
+	opts.SetKeepAlive(time.Duration(cfg.MQTT.KeepAlive) * time.Second)
+	opts.SetAutoReconnect(true)
+	opts.SetConnectRetry(true)
+	opts.SetConnectRetryInterval(time.Duration(cfg.MQTT.ReconnectDelay) * time.Second)
+	opts.SetMaxReconnectInterval(time.Duration(cfg.MQTT.MaxReconnectDelay) * time.Second)
+	opts.SetConnectionLostHandler(func(c MQTT.Client, err error) {
+		logger.WithError(err).Error("MQTT connection lost")
+		setConnected(false)
+	})
+	opts.SetOnConnectHandler(func(c MQTT.Client) {
+		logger.Info("MQTT connected")
+		setConnected(true)
+		subscribeCommands()
+		sendStatus("ONLINE")
+	})
+
+	if cfg.MQTT.Username != "" {
+		opts.SetUsername(cfg.MQTT.Username)
+		opts.SetPassword(cfg.MQTT.Password)
+	}
+
+	if cfg.MQTT.SSL {
+		tlsConfig, err := buildTLSConfig()
+		if err != nil {
+			return fmt.Errorf("tls config: %w", err)
+		}
+		opts.SetTLSConfig(tlsConfig)
+	}
+
+	client := MQTT.NewClient(opts)
+	token := client.Connect()
+	if token.WaitTimeout(30*time.Second) && token.Error() != nil {
+		return fmt.Errorf("mqtt connect: %w", token.Error())
+	}
+
+	mqttClient = client
+	return nil
+}
+
+func buildTLSConfig() (*tls.Config, error) {
+	tc := &tls.Config{MinVersion: tls.VersionTLS12}
+
+	if cfg.MQTT.CACert != "" {
+		caCert, err := os.ReadFile(cfg.MQTT.CACert)
+		if err != nil {
+			return nil, fmt.Errorf("ca cert: %w", err)
+		}
+		caPool := x509.NewCertPool()
+		if !caPool.AppendCertsFromPEM(caCert) {
+			return nil, fmt.Errorf("failed to parse CA certificate")
+		}
+		tc.RootCAs = caPool
+	}
+
+	if cfg.MQTT.ClientCert != "" && cfg.MQTT.ClientKey != "" {
+		cert, err := tls.LoadX509KeyPair(cfg.MQTT.ClientCert, cfg.MQTT.ClientKey)
+		if err != nil {
+			return nil, fmt.Errorf("client cert: %w", err)
+		}
+		tc.Certificates = []tls.Certificate{cert}
+	}
+
+	return tc, nil
+}
+
+func subscribeCommands() {
+	if !cfg.Commands.Enabled || mqttClient == nil {
+		return
+	}
+	cmdTopic := strings.ReplaceAll(cfg.MQTT.Topics.Command, "{device_id}", getDeviceID())
+	token := mqttClient.Subscribe(cmdTopic, cfg.MQTT.QoS, handleCommand)
+	token.WaitTimeout(5 * time.Second)
+	if token.Error() != nil {
+		logger.WithError(token.Error()).Error("Failed to subscribe to commands")
+	} else {
+		logger.WithField("topic", cmdTopic).Info("Subscribed to commands")
+	}
+}
+
+func publishTelemetry(data interface{}) {
+	if mqttClient == nil || !mqttClient.IsConnected() {
+		return
+	}
+	topic := strings.ReplaceAll(cfg.MQTT.Topics.Telemetry, "{device_id}", getDeviceID())
+	payload, _ := json.Marshal(data)
+	token := mqttClient.Publish(topic, cfg.MQTT.QoS, false, payload)
+	token.WaitTimeout(5 * time.Second)
+}
+
+func publishStatus(status StatusData) {
+	if mqttClient == nil || !mqttClient.IsConnected() {
+		return
+	}
+	topic := strings.ReplaceAll(cfg.MQTT.Topics.Status, "{device_id}", getDeviceID())
+	payload, _ := json.Marshal(status)
+	mqttClient.Publish(topic, cfg.MQTT.QoS, true, payload)
+}
+
+func publishLog(level, msg string, fields map[string]interface{}) {
+	if !cfg.Logging.Remote || mqttClient == nil || !mqttClient.IsConnected() {
+		return
+	}
+	topic := strings.ReplaceAll(cfg.MQTT.Topics.Log, "{device_id}", getDeviceID())
+	entry := map[string]interface{}{
+		"level":     level,
+		"message":   msg,
+		"timestamp": time.Now().UTC().Format(time.RFC3339),
+	}
+	for k, v := range fields {
+		entry[k] = v
+	}
+	payload, _ := json.Marshal(entry)
+	mqttClient.Publish(topic, 0, false, payload)
+}
+
+// ---------- Command Handler ----------
+
+func handleCommand(client MQTT.Client, msg MQTT.Message) {
+	var cmd CommandRequest
+	if err := json.Unmarshal(msg.Payload(), &cmd); err != nil {
+		logger.WithError(err).Warn("invalid command payload")
+		return
+	}
+
+	logger.WithFields(logrus.Fields{"id": cmd.ID, "type": cmd.Type}).Info("received command")
+
+	var resp CommandResponse
+	resp.ID = cmd.ID
+	resp.Timestamp = time.Now().UTC().Format(time.RFC3339)
+
+	switch cmd.Type {
+	case "reboot":
+		resp = execReboot(cmd)
+	case "restart_agent":
+		resp = execRestartAgent(cmd)
+	case "update_config":
+		resp = execUpdateConfig(cmd)
+	case "run_shell":
+		resp = execShell(cmd)
+	case "update_firmware":
+		resp = execFirmwareUpdate(cmd)
+	case "set_relay":
+		resp = execSetRelay(cmd)
+	case "read_register":
+		resp = execReadRegister(cmd)
+	default:
+		resp.Status = "rejected"
+		resp.Error = fmt.Sprintf("unknown command type: %s", cmd.Type)
+	}
+
+	sendCommandResponse(resp)
+}
+
+func execReboot(cmd CommandRequest) CommandResponse {
+	logger.Warn("executing reboot command")
+	go func() {
+		time.Sleep(2 * time.Second)
+		exec.Command("sudo", "reboot").Run()
+	}()
+	return CommandResponse{ID: cmd.ID, Status: "accepted", Result: "rebooting in 2s", Timestamp: time.Now().UTC().Format(time.RFC3339)}
+}
+
+func execRestartAgent(cmd CommandRequest) CommandResponse {
+	logger.Warn("executing agent restart")
+	go func() {
+		time.Sleep(1 * time.Second)
+		os.Exit(0) // systemd will restart
+	}()
+	return CommandResponse{ID: cmd.ID, Status: "accepted", Result: "restarting", Timestamp: time.Now().UTC().Format(time.RFC3339)}
+}
+
+func execUpdateConfig(cmd CommandRequest) CommandResponse {
+	var newCfg Config
+	if err := json.Unmarshal(cmd.Payload, &newCfg); err != nil {
+		return CommandResponse{ID: cmd.ID, Status: "failed", Error: fmt.Sprintf("invalid config: %s", err), Timestamp: time.Now().UTC().Format(time.RFC3339)}
+	}
+	data, _ := yaml.Marshal(&newCfg)
+	if err := os.WriteFile(configPath(), data, 0644); err != nil {
+		return CommandResponse{ID: cmd.ID, Status: "failed", Error: err.Error(), Timestamp: time.Now().UTC().Format(time.RFC3339)}
+	}
+	return CommandResponse{ID: cmd.ID, Status: "completed", Result: "config updated, restart agent to apply", Timestamp: time.Now().UTC().Format(time.RFC3339)}
+}
+
+func execShell(cmd CommandRequest) CommandResponse {
+	var payload struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal(cmd.Payload, &payload); err != nil || payload.Command == "" {
+		return CommandResponse{ID: cmd.ID, Status: "failed", Error: "invalid shell command payload", Timestamp: time.Now().UTC().Format(time.RFC3339)}
+	}
+
+	allowed := false
+	for _, p := range cfg.Commands.Shell.AllowedPaths {
+		if strings.HasPrefix(payload.Command, p) {
+			allowed = true
+			break
+		}
+	}
+
+	// Allow basic safe commands
+	safeCommands := []string{"ls", "ps", "df", "free", "uptime", "cat /sys/class/thermal/thermal_zone0/temp", "ifconfig", "ip a", "systemctl status gateway-agent"}
+	for _, s := range safeCommands {
+		if payload.Command == s {
+			allowed = true
+			break
+		}
+	}
+
+	if !allowed {
+		return CommandResponse{ID: cmd.ID, Status: "rejected", Error: "command not in allowed paths", Timestamp: time.Now().UTC().Format(time.RFC3339)}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.Commands.Shell.Timeout)*time.Second)
+	defer cancel()
+
+	cmdObj := exec.CommandContext(ctx, "sh", "-c", payload.Command)
+	out, err := cmdObj.CombinedOutput()
+	if err != nil {
+		return CommandResponse{ID: cmd.ID, Status: "failed", Error: err.Error(), Result: string(out), Timestamp: time.Now().UTC().Format(time.RFC3339)}
+	}
+	return CommandResponse{ID: cmd.ID, Status: "completed", Result: string(out), Timestamp: time.Now().UTC().Format(time.RFC3339)}
+}
+
+func execFirmwareUpdate(cmd CommandRequest) CommandResponse {
+	var payload struct {
+		URL      string `json:"url"`
+		Checksum string `json:"checksum"`
+		Version  string `json:"version"`
+	}
+	if err := json.Unmarshal(cmd.Payload, &payload); err != nil {
+		return CommandResponse{ID: cmd.ID, Status: "failed", Error: "invalid payload", Timestamp: time.Now().UTC().Format(time.RFC3339)}
+	}
+
+	logger.WithField("version", payload.Version).Info("starting firmware update")
+	os.MkdirAll(cfg.OTA.FirmwareDir, 0755)
+	os.MkdirAll(cfg.OTA.BackupDir, 0755)
+
+	binPath := filepath.Join(cfg.OTA.FirmwareDir, fmt.Sprintf("gateway-agent-%s", payload.Version))
+	if err := downloadFile(binPath, payload.URL); err != nil {
+		return CommandResponse{ID: cmd.ID, Status: "failed", Error: fmt.Sprintf("download: %s", err), Timestamp: time.Now().UTC().Format(time.RFC3339)}
+	}
+
+	if payload.Checksum != "" {
+		data, _ := os.ReadFile(binPath)
+		hash := fmt.Sprintf("%x", md5.Sum(data))
+		if hash != payload.Checksum {
+			os.Remove(binPath)
+			return CommandResponse{ID: cmd.ID, Status: "failed", Error: "checksum mismatch", Timestamp: time.Now().UTC().Format(time.RFC3339)}
+		}
+	}
+
+	if err := os.Chmod(binPath, 0755); err != nil {
+		return CommandResponse{ID: cmd.ID, Status: "failed", Error: err.Error(), Timestamp: time.Now().UTC().Format(time.RFC3339)}
+	}
+
+	// Backup current binary
+	selfPath, _ := os.Executable()
+	backupPath := filepath.Join(cfg.OTA.BackupDir, "gateway-agent.bak")
+	os.Remove(backupPath)
+	if data, err := os.ReadFile(selfPath); err == nil {
+		os.WriteFile(backupPath, data, 0755)
+	}
+
+	// Replace and restart
+	if err := os.Rename(binPath, selfPath); err != nil {
+		return CommandResponse{ID: cmd.ID, Status: "failed", Error: err.Error(), Timestamp: time.Now().UTC().Format(time.RFC3339)}
+	}
+
+	go func() {
+		time.Sleep(1 * time.Second)
+		syscall.Kill(os.Getpid(), syscall.SIGTERM)
+	}()
+
+	return CommandResponse{ID: cmd.ID, Status: "completed", Result: fmt.Sprintf("updated to version %s, restarting", payload.Version), Timestamp: time.Now().UTC().Format(time.RFC3339)}
+}
+
+func execSetRelay(cmd CommandRequest) CommandResponse {
+	var payload struct {
+		Name  string `json:"name"`
+		State bool   `json:"state"`
+	}
+	if err := json.Unmarshal(cmd.Payload, &payload); err != nil {
+		return CommandResponse{ID: cmd.ID, Status: "failed", Error: "invalid payload", Timestamp: time.Now().UTC().Format(time.RFC3339)}
+	}
+
+	pin := -1
+	for _, s := range cfg.GPIO.Sensors {
+		if s.Name == payload.Name && s.Mode == "output" {
+			pin = s.Pin
+			break
+		}
+	}
+	if pin < 0 {
+		return CommandResponse{ID: cmd.ID, Status: "failed", Error: fmt.Sprintf("relay '%s' not found", payload.Name), Timestamp: time.Now().UTC().Format(time.RFC3339)}
+	}
+
+	val := "0"
+	if payload.State {
+		val = "1"
+	}
+	cmdOut := exec.Command("gpio", "write", strconv.Itoa(pin), val)
+	if err := cmdOut.Run(); err != nil {
+		return CommandResponse{ID: cmd.ID, Status: "failed", Error: err.Error(), Timestamp: time.Now().UTC().Format(time.RFC3339)}
+	}
+	return CommandResponse{ID: cmd.ID, Status: "completed", Result: map[string]interface{}{"relay": payload.Name, "state": payload.State}, Timestamp: time.Now().UTC().Format(time.RFC3339)}
+}
+
+func execReadRegister(cmd CommandRequest) CommandResponse {
+	var payload struct {
+		Device string `yaml:"device"`
+		Name   string `yaml:"name"`
+	}
+	if err := json.Unmarshal(cmd.Payload, &payload); err != nil {
+		return CommandResponse{ID: cmd.ID, Status: "failed", Error: "invalid payload", Timestamp: time.Now().UTC().Format(time.RFC3339)}
+	}
+
+	handler, ok := modbusPools[payload.Device]
+	if !ok {
+		return CommandResponse{ID: cmd.ID, Status: "failed", Error: fmt.Sprintf("device '%s' not connected", payload.Device), Timestamp: time.Now().UTC().Format(time.RFC3339)}
+	}
+
+	for _, reg := range handler.device.Registers {
+		if reg.Name == payload.Name {
+			val, err := handler.readRegister(reg)
+			if err != nil {
+				return CommandResponse{ID: cmd.ID, Status: "failed", Error: err.Error(), Timestamp: time.Now().UTC().Format(time.RFC3339)}
+			}
+			return CommandResponse{ID: cmd.ID, Status: "completed", Result: val, Timestamp: time.Now().UTC().Format(time.RFC3339)}
+		}
+	}
+	return CommandResponse{ID: cmd.ID, Status: "failed", Error: fmt.Sprintf("register '%s' not found in device '%s'", payload.Name, payload.Device), Timestamp: time.Now().UTC().Format(time.RFC3339)}
+}
+
+func sendCommandResponse(resp CommandResponse) {
+	if mqttClient == nil || !mqttClient.IsConnected() {
+		return
+	}
+	topic := strings.ReplaceAll(cfg.MQTT.Topics.Command, "{device_id}", getDeviceID()) + "/response"
+	payload, _ := json.Marshal(resp)
+	mqttClient.Publish(topic, cfg.MQTT.QoS, false, payload)
+}
+
+// ---------- System Monitoring ----------
+
+func collectSystemMetrics() map[string]interface{} {
+	metrics := make(map[string]interface{})
+
+	if cfg.Monitoring.CPU {
+		if p, err := psCPU.Percent(0, false); err == nil && len(p) > 0 {
+			metrics["cpu_percent"] = math.Round(p[0]*100) / 100
+		}
+		if l, err := psLoad.Avg(); err == nil {
+			metrics["load_1"] = math.Round(l.Load1*100) / 100
+			metrics["load_5"] = math.Round(l.Load5*100) / 100
+			metrics["load_15"] = math.Round(l.Load15*100) / 100
+		}
+	}
+
+	if cfg.Monitoring.Memory {
+		if m, err := psMem.VirtualMemory(); err == nil {
+			metrics["memory_total_mb"] = int(m.Total / 1024 / 1024)
+			metrics["memory_used_mb"] = int(m.Used / 1024 / 1024)
+			metrics["memory_percent"] = math.Round(m.UsedPercent*100) / 100
+		}
+		if s, err := psMem.SwapMemory(); err == nil {
+			if s.Total > 0 {
+				metrics["swap_total_mb"] = int(s.Total / 1024 / 1024)
+				metrics["swap_used_mb"] = int(s.Used / 1024 / 1024)
+			}
+		}
+	}
+
+	if cfg.Monitoring.Disk {
+		diskMetrics := make(map[string]interface{})
+		partitions, _ := psDisk.Partitions(false)
+		for _, p := range partitions {
+			if usage, err := psDisk.Usage(p.Mountpoint); err == nil {
+				diskMetrics[p.Mountpoint] = map[string]interface{}{
+					"total_gb":  int(usage.Total / 1024 / 1024 / 1024),
+					"used_gb":   int(usage.Used / 1024 / 1024 / 1024),
+					"free_gb":   int(usage.Free / 1024 / 1024 / 1024),
+					"used_pct":  math.Round(usage.UsedPercent*100) / 100,
+				}
+			}
+		}
+		metrics["disk"] = diskMetrics
+	}
+
+	if cfg.Monitoring.Temperature {
+		temp := getCPUTemperature()
+		if temp >= 0 {
+			metrics["temperature_c"] = temp
+		}
+	}
+
+	if cfg.Monitoring.Network {
+		if io, err := psNet.IOCounters(false); err == nil && len(io) > 0 {
+			metrics["network_rx_bytes"] = io[0].BytesRecv
+			metrics["network_tx_bytes"] = io[0].BytesSent
+		}
+		metrics["uptime_seconds"] = int64(time.Since(startTime).Seconds())
+	}
+
+	return metrics
+}
+
+func getCPUTemperature() float64 {
+	data, err := os.ReadFile("/sys/class/thermal/thermal_zone0/temp")
+	if err != nil {
+		return -1
+	}
+	tempStr := strings.TrimSpace(string(data))
+	temp, err := strconv.ParseFloat(tempStr, 64)
+	if err != nil {
+		return -1
+	}
+	return temp / 1000.0
+}
+
+// ---------- Watchdog ----------
+
+func startWatchdog(ctx context.Context) {
+	if !cfg.Watchdog.Enabled {
+		return
+	}
+
+	ticker := time.NewTicker(time.Duration(cfg.Watchdog.Interval) * time.Second)
+	defer ticker.Stop()
+
+	missed := 0
+	maxMissed := cfg.Watchdog.MaxMissedPings
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if !isConnected() {
+				missed++
+				logger.WithField("missed", missed).Warn("watchdog: MQTT disconnected")
+				if missed >= maxMissed {
+					logger.Error("watchdog: max missed pings, taking action")
+					switch cfg.Watchdog.Action {
+					case "restart":
+						os.Exit(0)
+					case "reboot":
+						exec.Command("sudo", "reboot").Run()
+					default:
+						if cfg.Watchdog.Action != "" {
+							exec.Command("sh", "-c", cfg.Watchdog.Action).Run()
+						}
+					}
+					return
+				}
+			} else {
+				missed = 0
+				sendStatus("ONLINE")
+			}
+		}
+	}
+}
+
+// ---------- Utilities ----------
+
+func getDeviceID() string {
+	state.mu.RLock()
+	id := state.DeviceID
+	state.mu.RUnlock()
+	return id
+}
+
+func setConnected(v bool) {
+	state.mu.Lock()
+	state.Connected = v
+	state.mu.Unlock()
+}
+
+func isConnected() bool {
+	state.mu.RLock()
+	defer state.mu.RUnlock()
+	if mqttClient != nil {
+		return mqttClient.IsConnected()
+	}
+	return state.Connected
+}
+
+func getSerialNumber() string {
+	data, err := os.ReadFile("/proc/cpuinfo")
+	if err != nil {
+		return ""
+	}
+	scanner := bufio.NewScanner(strings.NewReader(string(data)))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "Serial") {
+			parts := strings.Split(line, ":")
+			if len(parts) == 2 {
+				return strings.TrimSpace(parts[1])
+			}
+		}
+	}
+	return ""
+}
+
+func getMACAddress() string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp != 0 && iface.HardwareAddr != nil && iface.Name != "lo" {
+			return iface.HardwareAddr.String()
+		}
+	}
+	return ""
+}
+
+func getIPAddress() string {
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err != nil {
+		return "0.0.0.0"
+	}
+	defer conn.Close()
+	localAddr := conn.LocalAddr().(*net.UDPAddr)
+	return localAddr.IP.String()
+}
+
+func configPath() string {
+	if p := os.Getenv("GATEWAY_CONFIG"); p != "" {
+		return p
+	}
+	return "/opt/gateway/config.yml"
+}
+
+func downloadFile(path, url string) error {
+	resp, err := http.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	out, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, resp.Body)
+	return err
+}
+
+// ---------- Main Loop ----------
+
+func runTelemetryLoop(ctx context.Context) {
+	ticker := time.NewTicker(time.Duration(cfg.Monitoring.Interval) * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			telemetry := TelemetryData{
+				DeviceID:  getDeviceID(),
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+			}
+
+			telemetry.System = collectSystemMetrics()
+
+			// Check thresholds
+			if sys, ok := telemetry.System.(map[string]interface{}); ok {
+				if cpu, ok := sys["cpu_percent"].(float64); ok && cpu > float64(cfg.Monitoring.CPUThresholdWarn) {
+					logger.WithField("cpu", cpu).Warn("CPU threshold exceeded")
+				}
+				if mem, ok := sys["memory_percent"].(float64); ok && mem > float64(cfg.Monitoring.MemoryThresholdWarn) {
+					logger.WithField("memory", mem).Warn("Memory threshold exceeded")
+				}
+				if temp, ok := sys["temperature_c"].(float64); ok && temp > float64(cfg.Monitoring.TempThresholdWarn) {
+					logger.WithField("temperature", temp).Warn("Temperature threshold exceeded")
+				}
+			}
+
+			// Collect Modbus data
+			if cfg.Modbus.Enabled {
+				var modbusVals []ModbusValue
+				for _, mh := range modbusPools {
+					vals := mh.readRegisters()
+					modbusVals = append(modbusVals, vals...)
+				}
+				telemetry.Modbus = modbusVals
+			}
+
+			publishTelemetry(telemetry)
+			state.mu.Lock()
+			state.LastTelemetry = time.Now()
+			state.mu.Unlock()
+		}
+	}
+}
+
+func runModbusLoop(ctx context.Context) {
+	if !cfg.Modbus.Enabled {
+		return
+	}
+
+	type poller struct {
+		handler  *modbusHandler
+		interval time.Duration
+		ticker   *time.Ticker
+	}
+
+	var pollers []*poller
+	for _, dev := range cfg.Modbus.Devices {
+		mh, ok := modbusPools[dev.Name]
+		if !ok {
+			continue
+		}
+		interval := dev.Interval
+		if interval <= 0 {
+			interval = 10
+		}
+		p := &poller{
+			handler:  mh,
+			interval: time.Duration(interval) * time.Second,
+			ticker:   time.NewTicker(time.Duration(interval) * time.Second),
+		}
+		pollers = append(pollers, p)
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			for _, p := range pollers {
+				p.ticker.Stop()
+			}
+			return
+		default:
+			for _, p := range pollers {
+				select {
+				case <-p.ticker.C:
+					vals := p.handler.readRegisters()
+					if len(vals) > 0 {
+						logger.WithFields(logrus.Fields{
+							"device": p.handler.name,
+							"values": len(vals),
+						}).Debug("modbus poll completed")
+					}
+				default:
+				}
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+}
+
+func sendStatus(status string) {
+	s := StatusData{
+		DeviceID:    getDeviceID(),
+		Status:      status,
+		Uptime:      int64(time.Since(startTime).Seconds()),
+		Version:     version,
+		IP:          getIPAddress(),
+		LastSeen:    time.Now().UTC().Format(time.RFC3339),
+		FirmwareVer: version,
+	}
+	publishStatus(s)
+}
+
+// ---------- Main ----------
+
+func main() {
+	logger.SetFormatter(&logrus.TextFormatter{
+		FullTimestamp: true,
+		ForceColors:   runtime.GOOS != "linux",
+	})
+
+	// Parse flags
+	configFile := configPath()
+	for i, arg := range os.Args {
+		if arg == "--config" && i+1 < len(os.Args) {
+			configFile = os.Args[i+1]
+		}
+		if arg == "--version" {
+			fmt.Printf("Mango IoT Gateway Agent v%s\n", version)
+			os.Exit(0)
+		}
+	}
+
+	// Load config
+	data, err := os.ReadFile(configFile)
+	if err != nil {
+		logger.Fatalf("Cannot read config %s: %v", configFile, err)
+	}
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		logger.Fatalf("Cannot parse config: %v", err)
+	}
+
+	if cfg.MQTT.Topics.Telemetry == "" {
+		cfg.MQTT.Topics.Telemetry = "gateway/{device_id}/telemetry"
+	}
+	if cfg.MQTT.Topics.Status == "" {
+		cfg.MQTT.Topics.Status = "gateway/{device_id}/status"
+	}
+	if cfg.MQTT.Topics.Log == "" {
+		cfg.MQTT.Topics.Log = "gateway/{device_id}/log"
+	}
+	if cfg.MQTT.Topics.Command == "" {
+		cfg.MQTT.Topics.Command = "gateway/{device_id}/command/set"
+	}
+
+	if cfg.Monitoring.Interval <= 0 {
+		cfg.Monitoring.Interval = 30
+	}
+	if cfg.MQTT.ClientIDPrefix == "" {
+		cfg.MQTT.ClientIDPrefix = "gw"
+	}
+	if cfg.MQTT.QoS == 0 {
+		cfg.MQTT.QoS = 1
+	}
+	if cfg.MQTT.KeepAlive <= 0 {
+		cfg.MQTT.KeepAlive = 60
+	}
+	if cfg.MQTT.ReconnectDelay <= 0 {
+		cfg.MQTT.ReconnectDelay = 5
+	}
+	if cfg.MQTT.MaxReconnectDelay <= 0 {
+		cfg.MQTT.MaxReconnectDelay = 60
+	}
+
+	// Setup logging
+	switch cfg.Logging.Level {
+	case "debug":
+		logger.SetLevel(logrus.DebugLevel)
+	case "warn":
+		logger.SetLevel(logrus.WarnLevel)
+	case "error":
+		logger.SetLevel(logrus.ErrorLevel)
+	default:
+		logger.SetLevel(logrus.InfoLevel)
+	}
+
+	if cfg.Logging.File != "" {
+		f, err := os.OpenFile(cfg.Logging.File, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err == nil {
+			logger.SetOutput(io.MultiWriter(os.Stderr, f))
+		}
+	}
+
+	// Initialize device ID
+	deviceID := cfg.Gateway.DeviceID
+	if deviceID == "" {
+		deviceID = strings.ReplaceAll(getMACAddress(), ":", "")
+		if deviceID == "" {
+			deviceID = fmt.Sprintf("pi-%d", time.Now().Unix())
+		}
+	}
+
+	serial := cfg.Gateway.SerialNumber
+	if serial == "" {
+		serial = getSerialNumber()
+	}
+
+	state.mu.Lock()
+	state.DeviceID = deviceID
+	state.FirmwareVersion = version
+	state.mu.Unlock()
+
+	info, _ := psHost.Info()
+	logger.WithFields(logrus.Fields{
+		"device_id":  deviceID,
+		"serial":     serial,
+		"hostname":   info.Hostname,
+		"os":         info.OS,
+		"platform":   info.Platform,
+		"kernel":     info.KernelVersion,
+		"version":    version,
+	}).Info("Mango IoT Gateway Agent starting")
+
+	// Connect MQTT
+	if err := mqttConnect(); err != nil {
+		logger.WithError(err).Fatal("MQTT connection failed")
+	}
+
+	// Initialize Modbus
+	if cfg.Modbus.Enabled {
+		for _, dev := range cfg.Modbus.Devices {
+			mh, err := newModbusHandler(dev)
+			if err != nil {
+				logger.WithError(err).WithField("device", dev.Name).Error("modbus init failed")
+				continue
+			}
+			modbusPools[dev.Name] = mh
+			logger.WithField("device", dev.Name).Info("modbus device connected")
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Start loops
+	go runTelemetryLoop(ctx)
+	go runModbusLoop(ctx)
+	go startWatchdog(ctx)
+
+	// Print hardware info
+	logger.WithFields(logrus.Fields{
+		"cpu_count": runtime.NumCPU(),
+		"go_arch":   runtime.GOARCH,
+		"go_os":     runtime.GOOS,
+	}).Info("Hardware info")
+
+	// Send initial status
+	time.Sleep(2 * time.Second) // wait for MQTT to settle
+	sendStatus("ONLINE")
+
+	// Wait for signal
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	sig := <-sigCh
+
+	logger.WithField("signal", sig.String()).Info("shutting down")
+	sendStatus("OFFLINE")
+	time.Sleep(500 * time.Millisecond)
+
+	// Cleanup
+	for _, mh := range modbusPools {
+		mh.close()
+	}
+	if mqttClient != nil {
+		mqttClient.Disconnect(1000)
+	}
+}
