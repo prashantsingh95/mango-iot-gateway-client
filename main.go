@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/md5"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
@@ -249,7 +248,77 @@ var (
 	secrets     *secretsManager
 	modbusCol   *modbusCollector
 	healthSrv   *healthServer
+	telemetryBuf *telemetryBuffer
 )
+
+// ---------- Telemetry Buffer (persistent, survives restarts) ----------
+
+type telemetryBuffer struct {
+	mu       sync.Mutex
+	filePath string
+	queue    [][]byte
+	maxSize  int
+}
+
+func newTelemetryBuffer(filePath string, maxSize int) *telemetryBuffer {
+	tb := &telemetryBuffer{
+		filePath: filePath,
+		maxSize:  maxSize,
+	}
+	// Load existing buffer from disk
+	data, err := os.ReadFile(filePath)
+	if err == nil && len(data) > 0 {
+		lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+		for _, line := range lines {
+			if len(line) > 0 {
+				tb.queue = append(tb.queue, []byte(line))
+			}
+		}
+		logger.WithField("count", len(tb.queue)).Info("telemetry buffer loaded from disk")
+	}
+	return tb
+}
+
+func (tb *telemetryBuffer) push(payload []byte) {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	if len(tb.queue) >= tb.maxSize {
+		tb.queue = tb.queue[1:] // drop oldest
+	}
+	tb.queue = append(tb.queue, payload)
+	tb.persist()
+}
+
+func (tb *telemetryBuffer) pop() ([][]byte, bool) {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	if len(tb.queue) == 0 {
+		return nil, false
+	}
+	// Return all queued items
+	items := tb.queue
+	tb.queue = nil
+	tb.persist()
+	return items, true
+}
+
+func (tb *telemetryBuffer) persist() {
+	if tb.filePath == "" {
+		return
+	}
+	var buf strings.Builder
+	for _, item := range tb.queue {
+		buf.Write(item)
+		buf.WriteByte('\n')
+	}
+	os.WriteFile(tb.filePath, []byte(buf.String()), 0644)
+}
+
+func (tb *telemetryBuffer) len() int {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	return len(tb.queue)
+}
 
 // ---------- Secrets Encryption ----------
 
@@ -525,7 +594,6 @@ func (mh *modbusHandler) readRegister(reg ModbusRegister) (ModbusValue, error) {
 	mv := ModbusValue{Name: reg.Name, Time: time.Now()}
 
 	var raw []byte
-	var err error
 
 	switch reg.Type {
 	case "coil":
@@ -914,29 +982,49 @@ func execShell(cmd CommandRequest) CommandResponse {
 
 func execFirmwareUpdate(cmd CommandRequest) CommandResponse {
 	var payload struct {
-		URL      string `json:"url"`
-		Checksum string `json:"checksum"`
-		Version  string `json:"version"`
+		URL         string `json:"url"`
+		DownloadURL string `json:"downloadUrl"`
+		Checksum    string `json:"checksum"`
+		Version     string `json:"version"`
+		FirmwareID  string `json:"firmwareId"`
+		Filename    string `json:"filename"`
 	}
 	if err := json.Unmarshal(cmd.Payload, &payload); err != nil {
 		return CommandResponse{ID: cmd.ID, Status: "failed", Error: "invalid payload", Timestamp: time.Now().UTC().Format(time.RFC3339)}
 	}
 
-	logger.WithField("version", payload.Version).Info("starting firmware update")
+	// Support both field naming conventions (platform uses downloadUrl/firmwareId, client uses url)
+	url := payload.URL
+	if url == "" {
+		url = payload.DownloadURL
+	}
+	version := payload.Version
+	if version == "" && payload.FirmwareID != "" {
+		version = payload.FirmwareID
+	}
+	filename := payload.Filename
+	if filename == "" && version != "" {
+		filename = fmt.Sprintf("gateway-agent-%s", version)
+	}
+
+	if url == "" {
+		return CommandResponse{ID: cmd.ID, Status: "failed", Error: "missing url/downloadUrl", Timestamp: time.Now().UTC().Format(time.RFC3339)}
+	}
+	if payload.Checksum == "" {
+		return CommandResponse{ID: cmd.ID, Status: "failed", Error: "checksum required", Timestamp: time.Now().UTC().Format(time.RFC3339)}
+	}
+
+	logger.WithFields(logrus.Fields{"version": version, "url": url}).Info("starting firmware update")
 	os.MkdirAll(cfg.OTA.FirmwareDir, 0755)
 	os.MkdirAll(cfg.OTA.BackupDir, 0755)
 
-	binPath := filepath.Join(cfg.OTA.FirmwareDir, fmt.Sprintf("gateway-agent-%s", payload.Version))
-	if err := downloadFile(binPath, payload.URL); err != nil {
+	binPath := filepath.Join(cfg.OTA.FirmwareDir, filename)
+	if err := downloadFile(binPath, url); err != nil {
 		return CommandResponse{ID: cmd.ID, Status: "failed", Error: fmt.Sprintf("download: %s", err), Timestamp: time.Now().UTC().Format(time.RFC3339)}
 	}
 
 	data, _ := os.ReadFile(binPath)
 	hash := fmt.Sprintf("%x", sha256.Sum256(data))
-	if payload.Checksum == "" {
-		os.Remove(binPath)
-		return CommandResponse{ID: cmd.ID, Status: "failed", Error: "checksum required", Timestamp: time.Now().UTC().Format(time.RFC3339)}
-	}
 	if hash != payload.Checksum {
 		os.Remove(binPath)
 		return CommandResponse{ID: cmd.ID, Status: "failed", Error: "checksum mismatch", Timestamp: time.Now().UTC().Format(time.RFC3339)}
