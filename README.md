@@ -117,24 +117,47 @@ Designed for production deployments — static binary, minimal dependencies, sys
 
 ## Quick Start
 
-### 1. Copy to the Pi
+### 1. Deploy Platform First (on your server)
 
 ```bash
-# From your development machine:
-scp -r mango-iot-gateway-client pi@YOUR_PI_IP:~/
-ssh pi@YOUR_PI_IP
-cd mango-iot-gateway-client
+git clone https://github.com/mango-iot/gateway-platform.git
+cd mango-iot-gateway-platform
+sudo bash setup-server.sh
 ```
 
-Or clone directly on the Pi:
+After platform setup, login at `http://YOUR_SERVER_IP:3000` and:
+1. Go to **Provisioning** page → Create Token → copy it
+2. Get MQTT credentials from `/root/.iot-server-credentials`
+
+### 2. Install Gateway Agent on Pi (One Command)
 
 ```bash
+# From your machine:
+scp -r gateway-client pi@YOUR_PI_IP:~/
 ssh pi@YOUR_PI_IP
-git clone https://github.com/mango-iot/gateway-client.git
 cd gateway-client
+
+# Fully automated install with all params
+sudo bash setup.sh \
+  --server mqtt://YOUR_SERVER_IP:1883 \
+  --mqtt-user iot \
+  --mqtt-pass YOUR_MQTT_PASSWORD \
+  --token YOUR_PROVISION_TOKEN \
+  --device-id factory-gw-01 \
+  --name "Factory Gateway #1"
 ```
 
-### 2. Run the installer
+### 3. Enable Terminal Access (SSH)
+In platform UI: **Settings** → add:
+- `sshUsername`: your Pi username (e.g., `pi`)
+- `sshPassword`: your Pi SSH password
+- `sshPort`: 22
+
+Now you can open **Terminal** tab in gateway detail view!
+
+---
+
+### Manual Install (Interactive)
 
 ```bash
 sudo bash setup.sh
@@ -144,18 +167,6 @@ This will prompt for:
 - MQTT broker URL (from your cloud server)
 - MQTT username/password
 - Provisioning token (from the cloud platform's Provisioning page)
-
-### 3. Fully automated install
-
-```bash
-sudo bash setup.sh \
-  --server mqtt://YOUR_SERVER_IP:1883 \
-  --mqtt-user iot \
-  --mqtt-pass MySecret123 \
-  --token prov-token-abc-123 \
-  --device-id factory-gw-01 \
-  --name "Factory Floor Gateway #1"
-```
 
 ### What the installer does:
 
