@@ -3,9 +3,13 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/md5"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -228,7 +232,226 @@ var (
 	logger      = logrus.New()
 	startTime   = time.Now()
 	version     = "1.0.0"
+	secrets     *secretsManager
+	modbusCol   *modbusCollector
+	healthSrv   *healthServer
 )
+
+// ---------- Secrets Encryption ----------
+
+type secretsManager struct {
+	key     []byte
+	keyPath string
+	mu      sync.Mutex
+}
+
+func newSecretsManager(keyPath string) *secretsManager {
+	sm := &secretsManager{keyPath: keyPath}
+	data, err := os.ReadFile(keyPath)
+	if err != nil {
+		sm.key = make([]byte, 32)
+		if _, err := rand.Read(sm.key); err != nil {
+			logger.WithError(err).Warn("secrets: key generation failed, secrets will be stored in plaintext")
+			return nil
+		}
+		if err := os.MkdirAll(filepath.Dir(keyPath), 0700); err != nil {
+			logger.WithError(err).Warn("secrets: cannot create key dir")
+			return nil
+		}
+		if err := os.WriteFile(keyPath, sm.key, 0600); err != nil {
+			logger.WithError(err).Warn("secrets: cannot write key file")
+			return nil
+		}
+		logger.Info("secrets: encryption key generated")
+	} else {
+		sm.key = data
+	}
+	return sm
+}
+
+func (sm *secretsManager) encrypt(plaintext string) (string, error) {
+	if plaintext == "" || sm == nil {
+		return plaintext, nil
+	}
+	block, err := aes.NewCipher(sm.key)
+	if err != nil {
+		return "", err
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	nonce := make([]byte, aead.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+	sealed := aead.Seal(nonce, nonce, []byte(plaintext), nil)
+	return "enc:" + base64.StdEncoding.EncodeToString(sealed), nil
+}
+
+func (sm *secretsManager) decrypt(encrypted string) (string, error) {
+	if !strings.HasPrefix(encrypted, "enc:") || sm == nil {
+		return encrypted, nil
+	}
+	raw, err := base64.StdEncoding.DecodeString(encrypted[4:])
+	if err != nil {
+		return "", err
+	}
+	block, err := aes.NewCipher(sm.key)
+	if err != nil {
+		return "", err
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	nonceSize := aead.NonceSize()
+	if len(raw) < nonceSize {
+		return "", fmt.Errorf("ciphertext too short")
+	}
+	plaintext, err := aead.Open(nil, raw[:nonceSize], raw[nonceSize:], nil)
+	if err != nil {
+		return "", err
+	}
+	return string(plaintext), nil
+}
+
+func (sm *secretsManager) processConfig(cfg *Config) error {
+	if sm == nil {
+		return nil
+	}
+	var needsRewrite bool
+
+	if cfg.MQTT.Password != "" {
+		if strings.HasPrefix(cfg.MQTT.Password, "enc:") {
+			dec, err := sm.decrypt(cfg.MQTT.Password)
+			if err != nil {
+				return fmt.Errorf("decrypt mqtt password: %w", err)
+			}
+			cfg.MQTT.Password = dec
+		} else {
+			enc, err := sm.encrypt(cfg.MQTT.Password)
+			if err != nil {
+				return fmt.Errorf("encrypt mqtt password: %w", err)
+			}
+			cfg.MQTT.Password = enc
+			needsRewrite = true
+		}
+	}
+
+	if cfg.Gateway.ProvisionToken != "" {
+		if strings.HasPrefix(cfg.Gateway.ProvisionToken, "enc:") {
+			dec, err := sm.decrypt(cfg.Gateway.ProvisionToken)
+			if err != nil {
+				return fmt.Errorf("decrypt provision token: %w", err)
+			}
+			cfg.Gateway.ProvisionToken = dec
+		} else {
+			enc, err := sm.encrypt(cfg.Gateway.ProvisionToken)
+			if err != nil {
+				return fmt.Errorf("encrypt provision token: %w", err)
+			}
+			cfg.Gateway.ProvisionToken = enc
+			needsRewrite = true
+		}
+	}
+
+	if needsRewrite {
+		data, err := yaml.Marshal(cfg)
+		if err != nil {
+			return fmt.Errorf("marshal config: %w", err)
+		}
+		if err := os.WriteFile(configPath(), data, 0644); err != nil {
+			return fmt.Errorf("rewrite config: %w", err)
+		}
+		logger.Info("secrets: encrypted plaintext secrets in config file")
+	}
+	return nil
+}
+
+// ---------- Modbus Collector (async, thread-safe) ----------
+
+type modbusCollector struct {
+	mu     sync.Mutex
+	values map[string][]ModbusValue
+}
+
+func newModbusCollector() *modbusCollector {
+	return &modbusCollector{values: make(map[string][]ModbusValue)}
+}
+
+func (mc *modbusCollector) set(deviceName string, vals []ModbusValue) {
+	mc.mu.Lock()
+	if len(vals) > 0 {
+		mc.values[deviceName] = vals
+	} else {
+		delete(mc.values, deviceName)
+	}
+	mc.mu.Unlock()
+}
+
+func (mc *modbusCollector) getAll() []ModbusValue {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+	var result []ModbusValue
+	for _, vals := range mc.values {
+		result = append(result, vals...)
+	}
+	return result
+}
+
+// ---------- HTTP Health Server ----------
+
+type healthServer struct {
+	server *http.Server
+}
+
+func newHealthServer(addr string) *healthServer {
+	mux := http.NewServeMux()
+	hs := &healthServer{
+		server: &http.Server{Addr: addr, Handler: mux},
+	}
+	mux.HandleFunc("/health", hs.healthHandler)
+	mux.HandleFunc("/ready", hs.readyHandler)
+	return hs
+}
+
+func (hs *healthServer) start() {
+	ln, err := net.Listen("tcp", hs.server.Addr)
+	if err != nil {
+		logger.WithError(err).Warn("health server: cannot listen, skipping")
+		return
+	}
+	go hs.server.Serve(ln)
+	logger.WithField("addr", hs.server.Addr).Info("health server started")
+}
+
+func (hs *healthServer) stop() {
+	if hs.server != nil {
+		hs.server.Close()
+	}
+}
+
+func (hs *healthServer) healthHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":  "ok",
+		"uptime":  int64(time.Since(startTime).Seconds()),
+		"version": version,
+	})
+}
+
+func (hs *healthServer) readyHandler(w http.ResponseWriter, r *http.Request) {
+	if isConnected() {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{"status": "ready"})
+	} else {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]string{"status": "not ready"})
+	}
+}
 
 // ---------- Modbus Handler ----------
 
@@ -554,6 +777,12 @@ func execUpdateConfig(cmd CommandRequest) CommandResponse {
 	if err := json.Unmarshal(cmd.Payload, &newCfg); err != nil {
 		return CommandResponse{ID: cmd.ID, Status: "failed", Error: fmt.Sprintf("invalid config: %s", err), Timestamp: time.Now().UTC().Format(time.RFC3339)}
 	}
+
+	// Encrypt secrets before writing to disk
+	if err := secrets.processConfig(&newCfg); err != nil {
+		return CommandResponse{ID: cmd.ID, Status: "failed", Error: fmt.Sprintf("secrets: %s", err), Timestamp: time.Now().UTC().Format(time.RFC3339)}
+	}
+
 	data, _ := yaml.Marshal(&newCfg)
 	if err := os.WriteFile(configPath(), data, 0644); err != nil {
 		return CommandResponse{ID: cmd.ID, Status: "failed", Error: err.Error(), Timestamp: time.Now().UTC().Format(time.RFC3339)}
@@ -570,19 +799,29 @@ func execShell(cmd CommandRequest) CommandResponse {
 	}
 
 	allowed := false
-	for _, p := range cfg.Commands.Shell.AllowedPaths {
-		if strings.HasPrefix(payload.Command, p) {
-			allowed = true
-			break
-		}
-	}
 
-	// Allow basic safe commands
+	// Check safe commands first (exact match only)
 	safeCommands := []string{"ls", "ps", "df", "free", "uptime", "cat /sys/class/thermal/thermal_zone0/temp", "ifconfig", "ip a", "systemctl status gateway-agent"}
 	for _, s := range safeCommands {
 		if payload.Command == s {
 			allowed = true
 			break
+		}
+	}
+
+	// Resolve path traversal: extract first token, clean it, then check allowed paths
+	if !allowed {
+		tokens := strings.Fields(payload.Command)
+		if len(tokens) == 0 {
+			return CommandResponse{ID: cmd.ID, Status: "rejected", Error: "empty command", Timestamp: time.Now().UTC().Format(time.RFC3339)}
+		}
+		cmdToken := tokens[0]
+		cleaned := filepath.Clean(cmdToken)
+		for _, p := range cfg.Commands.Shell.AllowedPaths {
+			if strings.HasPrefix(cleaned, p) {
+				allowed = true
+				break
+			}
 		}
 	}
 
@@ -678,9 +917,9 @@ func execSetRelay(cmd CommandRequest) CommandResponse {
 	if payload.State {
 		val = "1"
 	}
-	cmdOut := exec.Command("gpio", "write", strconv.Itoa(pin), val)
-	if err := cmdOut.Run(); err != nil {
-		return CommandResponse{ID: cmd.ID, Status: "failed", Error: err.Error(), Timestamp: time.Now().UTC().Format(time.RFC3339)}
+	gpioPath := fmt.Sprintf("/sys/class/gpio/gpio%d/value", pin)
+	if err := os.WriteFile(gpioPath, []byte(val), 0644); err != nil {
+		return CommandResponse{ID: cmd.ID, Status: "failed", Error: fmt.Sprintf("gpio write: %s", err), Timestamp: time.Now().UTC().Format(time.RFC3339)}
 	}
 	return CommandResponse{ID: cmd.ID, Status: "completed", Result: map[string]interface{}{"relay": payload.Name, "state": payload.State}, Timestamp: time.Now().UTC().Format(time.RFC3339)}
 }
@@ -960,14 +1199,9 @@ func runTelemetryLoop(ctx context.Context) {
 				}
 			}
 
-			// Collect Modbus data
-			if cfg.Modbus.Enabled {
-				var modbusVals []ModbusValue
-				for _, mh := range modbusPools {
-					vals := mh.readRegisters()
-					modbusVals = append(modbusVals, vals...)
-				}
-				telemetry.Modbus = modbusVals
+			// Collect Modbus data from async collector
+			if cfg.Modbus.Enabled && modbusCol != nil {
+				telemetry.Modbus = modbusCol.getAll()
 			}
 
 			publishTelemetry(telemetry)
@@ -1019,6 +1253,9 @@ func runModbusLoop(ctx context.Context) {
 				select {
 				case <-p.ticker.C:
 					vals := p.handler.readRegisters()
+					if modbusCol != nil {
+						modbusCol.set(p.handler.name, vals)
+					}
 					if len(vals) > 0 {
 						logger.WithFields(logrus.Fields{
 							"device": p.handler.name,
@@ -1044,6 +1281,79 @@ func sendStatus(status string) {
 		FirmwareVer: version,
 	}
 	publishStatus(s)
+}
+
+// ---------- GPIO Initialization (sysfs) ----------
+
+func initGPIO() {
+	if !cfg.GPIO.Enabled {
+		return
+	}
+	for _, s := range cfg.GPIO.Sensors {
+		if s.Mode == "output" {
+			pinStr := strconv.Itoa(s.Pin)
+			// Export the GPIO pin (idempotent; ignore error if already exported)
+			os.WriteFile("/sys/class/gpio/export", []byte(pinStr), 0644)
+			time.Sleep(30 * time.Millisecond)
+			// Set direction
+			dirPath := fmt.Sprintf("/sys/class/gpio/gpio%s/direction", pinStr)
+			os.WriteFile(dirPath, []byte("out"), 0644)
+			// Set default state
+			val := "0"
+			if s.Default {
+				val = "1"
+			}
+			valPath := fmt.Sprintf("/sys/class/gpio/gpio%s/value", pinStr)
+			os.WriteFile(valPath, []byte(val), 0644)
+			logger.WithFields(logrus.Fields{"pin": s.Pin, "name": s.Name, "default": s.Default}).Info("GPIO output initialized")
+		}
+	}
+}
+
+// ---------- Config Hot-Reload (SIGHUP) ----------
+
+func startConfigReloader() {
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGHUP)
+	go func() {
+		for range sigCh {
+			logger.Info("SIGHUP received, reloading config")
+			data, err := os.ReadFile(configPath())
+			if err != nil {
+				logger.WithError(err).Error("config reload: read failed")
+				continue
+			}
+			var newCfg Config
+			if err := yaml.Unmarshal(data, &newCfg); err != nil {
+				logger.WithError(err).Error("config reload: parse failed")
+				continue
+			}
+			// Decrypt secrets
+			if secrets != nil {
+				if err := secrets.processConfig(&newCfg); err != nil {
+					logger.WithError(err).Error("config reload: secret processing failed")
+					continue
+				}
+			}
+			// Apply log level
+			switch newCfg.Logging.Level {
+			case "debug":
+				logger.SetLevel(logrus.DebugLevel)
+			case "warn":
+				logger.SetLevel(logrus.WarnLevel)
+			case "error":
+				logger.SetLevel(logrus.ErrorLevel)
+			default:
+				logger.SetLevel(logrus.InfoLevel)
+			}
+			// Update monitoring interval
+			if newCfg.Monitoring.Interval <= 0 {
+				newCfg.Monitoring.Interval = 30
+			}
+			cfg = newCfg
+			logger.WithField("interval", cfg.Monitoring.Interval).Info("config reloaded")
+		}
+	}()
 }
 
 // ---------- Main ----------
@@ -1126,6 +1436,12 @@ func main() {
 		}
 	}
 
+	// Initialize secrets encryption
+	secrets = newSecretsManager(filepath.Join(filepath.Dir(configFile), ".encryption_key"))
+	if err := secrets.processConfig(&cfg); err != nil {
+		logger.WithError(err).Warn("secrets: processing failed, continuing with plaintext")
+	}
+
 	// Initialize device ID
 	deviceID := cfg.Gateway.DeviceID
 	if deviceID == "" {
@@ -1174,6 +1490,12 @@ func main() {
 		}
 	}
 
+	// Initialize async Modbus collector
+	modbusCol = newModbusCollector()
+
+	// Initialize GPIO via sysfs
+	initGPIO()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -1181,6 +1503,13 @@ func main() {
 	go runTelemetryLoop(ctx)
 	go runModbusLoop(ctx)
 	go startWatchdog(ctx)
+
+	// Start HTTP health endpoint on localhost:8090
+	healthSrv = newHealthServer("127.0.0.1:8090")
+	healthSrv.start()
+
+	// Start config hot-reload via SIGHUP
+	startConfigReloader()
 
 	// Print hardware info
 	logger.WithFields(logrus.Fields{
@@ -1193,7 +1522,7 @@ func main() {
 	time.Sleep(2 * time.Second) // wait for MQTT to settle
 	sendStatus("ONLINE")
 
-	// Wait for signal
+	// Wait for signal (SIGINT/SIGTERM only; SIGHUP is handled separately)
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	sig := <-sigCh
@@ -1203,6 +1532,9 @@ func main() {
 	time.Sleep(500 * time.Millisecond)
 
 	// Cleanup
+	if healthSrv != nil {
+		healthSrv.stop()
+	}
 	for _, mh := range modbusPools {
 		mh.close()
 	}
