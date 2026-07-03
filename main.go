@@ -1323,6 +1323,49 @@ func getMACAddress() string {
 	return ""
 }
 
+func getModel() string {
+	data, err := os.ReadFile("/proc/device-tree/model")
+	if err != nil {
+		return "Raspberry Pi"
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func getManufacturer() string {
+	return "Raspberry Pi Foundation"
+}
+
+func getHardwareVersion() string {
+	data, err := os.ReadFile("/proc/cpuinfo")
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		if strings.HasPrefix(line, "Hardware") {
+			parts := strings.Split(line, ":")
+			if len(parts) == 2 {
+				return strings.TrimSpace(parts[1])
+			}
+		}
+	}
+	return ""
+}
+
+func getOSVersion() string {
+	data, err := os.ReadFile("/etc/os-release")
+	if err != nil {
+		return "Linux"
+	}
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		if strings.HasPrefix(line, "PRETTY_NAME=") {
+			return strings.Trim(strings.TrimPrefix(line, "PRETTY_NAME="), "\"")
+		}
+	}
+	return "Linux"
+}
+
 func getIPAddress() string {
 	conn, err := net.Dial("udp", "8.8.8.8:80")
 	if err != nil {
