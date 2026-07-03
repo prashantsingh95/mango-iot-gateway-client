@@ -198,22 +198,31 @@ type TelemetryData struct {
 	Timestamp   string                 `json:"timestamp"`
 	CPU         float64                `json:"cpu,omitempty"`
 	Memory      float64                `json:"memory,omitempty"`
-	Disk        interface{}            `json:"disk,omitempty"`
+	Disk        float64                `json:"disk,omitempty"`
 	Temperature float64                `json:"temperature,omitempty"`
+	Signal      float64                `json:"signal,omitempty"`
+	Voltage     float64                `json:"voltage,omitempty"`
+	Battery     float64                `json:"battery,omitempty"`
 	System      map[string]interface{} `json:"system,omitempty"`
 	Modbus      []ModbusValue          `json:"modbus,omitempty"`
 	GPIO        map[string]interface{} `json:"gpio,omitempty"`
 }
 
 type StatusData struct {
-	DeviceID    string `json:"device_id"`
-	Status      string `json:"status"`
-	Reason      string `json:"reason,omitempty"`
-	Uptime      int64  `json:"uptime"`
-	Version     string `json:"version"`
-	IP          string `json:"ip"`
-	LastSeen    string `json:"last_seen"`
-	FirmwareVer string `json:"firmware_version"`
+	DeviceID     string `json:"device_id"`
+	Status       string `json:"status"`
+	Reason       string `json:"reason,omitempty"`
+	Uptime       int64  `json:"uptime"`
+	Version      string `json:"version"`
+	IP           string `json:"ip"`
+	LastSeen     string `json:"last_seen"`
+	FirmwareVer  string `json:"firmware_version"`
+	SerialNumber string `json:"serial_number,omitempty"`
+	Model        string `json:"model,omitempty"`
+	Manufacturer string `json:"manufacturer,omitempty"`
+	MACAddress   string `json:"mac_address,omitempty"`
+	HardwareVer  string `json:"hardware_version,omitempty"`
+	OSVersion    string `json:"os_version,omitempty"`
 }
 
 type CommandRequest struct {
@@ -1314,6 +1323,79 @@ func getMACAddress() string {
 	return ""
 }
 
+func getSerialNumber() string {
+	data, err := os.ReadFile("/proc/cpuinfo")
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		if strings.HasPrefix(line, "Serial") {
+			parts := strings.Split(line, ":")
+			if len(parts) == 2 {
+				return strings.TrimSpace(parts[1])
+			}
+		}
+	}
+	return ""
+}
+
+func getModel() string {
+	data, err := os.ReadFile("/proc/device-tree/model")
+	if err != nil {
+		return "Raspberry Pi"
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func getManufacturer() string {
+	return "Raspberry Pi Foundation"
+}
+
+func getHardwareVersion() string {
+	data, err := os.ReadFile("/proc/cpuinfo")
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		if strings.HasPrefix(line, "Hardware") {
+			parts := strings.Split(line, ":")
+			if len(parts) == 2 {
+				return strings.TrimSpace(parts[1])
+			}
+		}
+	}
+	return ""
+}
+
+func getOSVersion() string {
+	data, err := os.ReadFile("/etc/os-release")
+	if err != nil {
+		return "Linux"
+	}
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		if strings.HasPrefix(line, "PRETTY_NAME=") {
+			return strings.Trim(strings.TrimPrefix(line, "PRETTY_NAME="), "\"")
+		}
+	}
+	return "Linux"
+}
+
+func getMACAddress() string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp != 0 && iface.HardwareAddr != nil && iface.Name != "lo" {
+			return iface.HardwareAddr.String()
+		}
+	}
+	return ""
+}
+
 func getIPAddress() string {
 	conn, err := net.Dial("udp", "8.8.8.8:80")
 	if err != nil {
@@ -1368,22 +1450,38 @@ func runTelemetryLoop(ctx context.Context) {
 				Timestamp: time.Now().UTC().Format(time.RFC3339),
 			}
 
-			sys := collectSystemMetrics()
-			telemetry.System = sys
+sys := collectSystemMetrics()
+		telemetry.System = sys
 
-			// Extract flat fields for platform compatibility
-			if v, ok := sys["cpu_percent"].(float64); ok {
-				telemetry.CPU = v
+		// Extract flat fields for platform compatibility
+		if v, ok := sys["cpu_percent"].(float64); ok {
+			telemetry.CPU = v
+		}
+		if v, ok := sys["memory_percent"].(float64); ok {
+			telemetry.Memory = v
+		}
+		// Extract root partition disk usage
+		if disk, ok := sys["disk"].(map[string]interface{}); ok {
+			if rootDisk, ok := disk["/"].(map[string]interface{}); ok {
+				if v, ok := rootDisk["used_pct"].(float64); ok {
+					telemetry.Disk = v
+				}
 			}
-			if v, ok := sys["memory_percent"].(float64); ok {
-				telemetry.Memory = v
-			}
-			if v, ok := sys["disk"]; ok {
-				telemetry.Disk = v
-			}
-			if v, ok := sys["temperature_c"].(float64); ok {
-				telemetry.Temperature = v
-			}
+		}
+		if v, ok := sys["temperature_c"].(float64); ok {
+			telemetry.Temperature = v
+		}
+		// Add signal strength (from wifi if available)
+		if v, ok := sys["signal_dbm"].(float64); ok {
+			telemetry.Signal = v
+		}
+		// Add voltage and battery (placeholder for Pi - could be extended with HAT readings)
+		if v, ok := sys["voltage_v"].(float64); ok {
+			telemetry.Voltage = v
+		}
+		if v, ok := sys["battery_percent"].(float64); ok {
+			telemetry.Battery = v
+		}
 
 			// Check thresholds
 			if telemetry.CPU > float64(cfg.Monitoring.CPUThresholdWarn) {
@@ -1473,14 +1571,20 @@ func sendStatus(status string, reason ...string) {
 		r = reason[0]
 	}
 	s := StatusData{
-		DeviceID:    getDeviceID(),
-		Status:      status,
-		Reason:      r,
-		Uptime:      int64(time.Since(startTime).Seconds()),
-		Version:     version,
-		IP:          getIPAddress(),
-		LastSeen:    time.Now().UTC().Format(time.RFC3339),
-		FirmwareVer: version,
+		DeviceID:     getDeviceID(),
+		Status:       status,
+		Reason:       r,
+		Uptime:       int64(time.Since(startTime).Seconds()),
+		Version:      version,
+		IP:           getIPAddress(),
+		LastSeen:     time.Now().UTC().Format(time.RFC3339),
+		FirmwareVer:  version,
+		SerialNumber: getSerialNumber(),
+		Model:        getModel(),
+		Manufacturer: getManufacturer(),
+		MACAddress:   getMACAddress(),
+		HardwareVer:  getHardwareVersion(),
+		OSVersion:    getOSVersion(),
 	}
 	publishStatus(s)
 }
@@ -1584,9 +1688,14 @@ func provisionGateway() {
 		"gateway": map[string]interface{}{
 			"deviceId":        getDeviceID(),
 			"name":            cfg.Gateway.Name,
-			"serialNumber":    cfg.Gateway.SerialNumber,
+			"serialNumber":    getSerialNumber(),
 			"tenantId":        cfg.Gateway.TenantID,
 			"firmwareVersion": version,
+			"model":           getModel(),
+			"manufacturer":    getManufacturer(),
+			"hardwareVersion": getHardwareVersion(),
+			"osVersion":       getOSVersion(),
+			"macAddress":      getMACAddress(),
 		},
 	}
 	payload, _ := json.Marshal(body)
