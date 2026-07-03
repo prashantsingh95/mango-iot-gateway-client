@@ -1303,7 +1303,7 @@ func getSerialNumber() string {
 		if strings.HasPrefix(line, "Serial") {
 			parts := strings.Split(line, ":")
 			if len(parts) == 2 {
-				return strings.TrimSpace(parts[1])
+				return strings.TrimSpace(strings.ReplaceAll(parts[1], "\x00", ""))
 			}
 		}
 	}
@@ -1328,7 +1328,8 @@ func getModel() string {
 	if err != nil {
 		return "Raspberry Pi"
 	}
-	return strings.TrimSpace(string(data))
+	// Strip null bytes which can cause issues with PostgreSQL
+	return strings.TrimSpace(strings.ReplaceAll(string(data), "\x00", ""))
 }
 
 func getManufacturer() string {
@@ -1345,7 +1346,7 @@ func getHardwareVersion() string {
 		if strings.HasPrefix(line, "Hardware") {
 			parts := strings.Split(line, ":")
 			if len(parts) == 2 {
-				return strings.TrimSpace(parts[1])
+				return strings.TrimSpace(strings.ReplaceAll(parts[1], "\x00", ""))
 			}
 		}
 	}
@@ -1360,7 +1361,7 @@ func getOSVersion() string {
 	lines := strings.Split(string(data), "\n")
 	for _, line := range lines {
 		if strings.HasPrefix(line, "PRETTY_NAME=") {
-			return strings.Trim(strings.TrimPrefix(line, "PRETTY_NAME="), "\"")
+			return strings.TrimSpace(strings.ReplaceAll(strings.TrimPrefix(line, "PRETTY_NAME="), "\x00", ""))
 		}
 	}
 	return "Linux"
