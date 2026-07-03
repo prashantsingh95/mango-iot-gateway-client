@@ -7,9 +7,11 @@ import (
 	"crypto/cipher"
 	"crypto/md5"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -46,6 +48,7 @@ type MQTTTopicConfig struct {
 	Status    string `yaml:"status"`
 	Log       string `yaml:"log"`
 	Command   string `yaml:"command"`
+	Response  string `yaml:"response"`
 }
 
 type MQTTConfig struct {
@@ -152,11 +155,12 @@ type CommandsConfig struct {
 }
 
 type GatewayConfig struct {
-	DeviceID      string `yaml:"device_id"`
-	Name          string `yaml:"name"`
-	SerialNumber  string `yaml:"serial_number"`
-	TenantID      string `yaml:"tenant_id"`
+	DeviceID       string `yaml:"device_id"`
+	Name           string `yaml:"name"`
+	SerialNumber   string `yaml:"serial_number"`
+	TenantID       string `yaml:"tenant_id"`
 	ProvisionToken string `yaml:"provision_token"`
+	PlatformURL    string `yaml:"platform_url"`
 }
 
 type Config struct {
@@ -191,16 +195,21 @@ type ModbusValue struct {
 }
 
 type TelemetryData struct {
-	DeviceID  string                 `json:"device_id"`
-	Timestamp string                 `json:"timestamp"`
-	System    map[string]interface{} `json:"system,omitempty"`
-	Modbus    []ModbusValue          `json:"modbus,omitempty"`
-	GPIO      map[string]interface{} `json:"gpio,omitempty"`
+	DeviceID    string                 `json:"device_id"`
+	Timestamp   string                 `json:"timestamp"`
+	CPU         float64                `json:"cpu,omitempty"`
+	Memory      float64                `json:"memory,omitempty"`
+	Disk        interface{}            `json:"disk,omitempty"`
+	Temperature float64                `json:"temperature,omitempty"`
+	System      map[string]interface{} `json:"system,omitempty"`
+	Modbus      []ModbusValue          `json:"modbus,omitempty"`
+	GPIO        map[string]interface{} `json:"gpio,omitempty"`
 }
 
 type StatusData struct {
 	DeviceID    string `json:"device_id"`
 	Status      string `json:"status"`
+	Reason      string `json:"reason,omitempty"`
 	Uptime      int64  `json:"uptime"`
 	Version     string `json:"version"`
 	IP          string `json:"ip"`
@@ -209,14 +218,16 @@ type StatusData struct {
 }
 
 type CommandRequest struct {
-	ID      string          `json:"id"`
-	Type    string          `json:"type"`
-	Payload json.RawMessage `json:"payload"`
+	ID        string          `json:"id"`
+	CommandID string          `json:"commandId"`
+	Type      string          `json:"type"`
+	Payload   json.RawMessage `json:"payload"`
 }
 
 type CommandResponse struct {
 	ID        string      `json:"id"`
 	Status    string      `json:"status"`
+	Success   bool        `json:"success"`
 	Result    interface{} `json:"result,omitempty"`
 	Error     string      `json:"error,omitempty"`
 	Timestamp string      `json:"timestamp"`
@@ -228,8 +239,11 @@ var (
 	cfg         Config
 	state       AgentState
 	mqttClient  MQTT.Client
+	mqttMu      sync.Mutex
 	modbusPools = make(map[string]*modbusHandler)
+	modbusMu    sync.RWMutex
 	logger      = logrus.New()
+	logFile     *os.File
 	startTime   = time.Now()
 	version     = "1.0.0"
 	secrets     *secretsManager
@@ -553,10 +567,7 @@ func (mh *modbusHandler) readRegister(reg ModbusRegister) (ModbusValue, error) {
 	switch reg.Type {
 	case "float32":
 		if len(raw) >= 4 {
-			mv.Value = math.Float32frombits(
-				(uint32(raw[0]) << 8) | uint32(raw[1])<<0 |
-				(uint32(raw[2]) << 24) | uint32(raw[3])<<16,
-			)
+			mv.Value = math.Float32frombits(binary.BigEndian.Uint32(raw))
 		}
 	case "int16":
 		if len(raw) >= 2 {
@@ -632,11 +643,16 @@ func mqttConnect() error {
 
 	client := MQTT.NewClient(opts)
 	token := client.Connect()
-	if token.WaitTimeout(30*time.Second) && token.Error() != nil {
+	if !token.WaitTimeout(30 * time.Second) {
+		return fmt.Errorf("mqtt connect: timeout after 30s")
+	}
+	if token.Error() != nil {
 		return fmt.Errorf("mqtt connect: %w", token.Error())
 	}
 
+	mqttMu.Lock()
 	mqttClient = client
+	mqttMu.Unlock()
 	return nil
 }
 
@@ -667,11 +683,21 @@ func buildTLSConfig() (*tls.Config, error) {
 }
 
 func subscribeCommands() {
-	if !cfg.Commands.Enabled || mqttClient == nil {
+	if !cfg.Commands.Enabled {
+		return
+	}
+	mqttMu.Lock()
+	c := mqttClient
+	mqttMu.Unlock()
+	if c == nil || !c.IsConnected() {
 		return
 	}
 	cmdTopic := strings.ReplaceAll(cfg.MQTT.Topics.Command, "{device_id}", getDeviceID())
-	token := mqttClient.Subscribe(cmdTopic, cfg.MQTT.QoS, handleCommand)
+	if strings.Contains(cmdTopic, "{device_id}") {
+		logger.Error("subscribe: command topic contains unresolved device_id placeholder")
+		return
+	}
+	token := c.Subscribe(cmdTopic, cfg.MQTT.QoS, handleCommand)
 	token.WaitTimeout(5 * time.Second)
 	if token.Error() != nil {
 		logger.WithError(token.Error()).Error("Failed to subscribe to commands")
@@ -680,27 +706,47 @@ func subscribeCommands() {
 	}
 }
 
-func publishTelemetry(data interface{}) {
-	if mqttClient == nil || !mqttClient.IsConnected() {
-		return
+func mqttPublish(topic string, qos byte, retained bool, payload []byte) error {
+	mqttMu.Lock()
+	c := mqttClient
+	mqttMu.Unlock()
+	if c == nil || !c.IsConnected() {
+		return fmt.Errorf("mqtt not connected")
 	}
+	if strings.Contains(topic, "{device_id}") || strings.Contains(topic, "{") {
+		return fmt.Errorf("topic contains unresolved placeholder: %s", topic)
+	}
+	token := c.Publish(topic, qos, retained, payload)
+	token.WaitTimeout(5 * time.Second)
+	return token.Error()
+}
+
+func publishTelemetry(data interface{}) {
 	topic := strings.ReplaceAll(cfg.MQTT.Topics.Telemetry, "{device_id}", getDeviceID())
 	payload, _ := json.Marshal(data)
-	token := mqttClient.Publish(topic, cfg.MQTT.QoS, false, payload)
-	token.WaitTimeout(5 * time.Second)
+	for i := 0; i < 3; i++ {
+		if err := mqttPublish(topic, cfg.MQTT.QoS, false, payload); err == nil {
+			return
+		} else if i < 2 {
+			time.Sleep(time.Duration(i+1) * time.Second)
+		}
+	}
 }
 
 func publishStatus(status StatusData) {
-	if mqttClient == nil || !mqttClient.IsConnected() {
-		return
-	}
 	topic := strings.ReplaceAll(cfg.MQTT.Topics.Status, "{device_id}", getDeviceID())
 	payload, _ := json.Marshal(status)
-	mqttClient.Publish(topic, cfg.MQTT.QoS, true, payload)
+	for i := 0; i < 3; i++ {
+		if err := mqttPublish(topic, cfg.MQTT.QoS, true, payload); err == nil {
+			return
+		} else if i < 2 {
+			time.Sleep(time.Duration(i+1) * time.Second)
+		}
+	}
 }
 
 func publishLog(level, msg string, fields map[string]interface{}) {
-	if !cfg.Logging.Remote || mqttClient == nil || !mqttClient.IsConnected() {
+	if !cfg.Logging.Remote {
 		return
 	}
 	topic := strings.ReplaceAll(cfg.MQTT.Topics.Log, "{device_id}", getDeviceID())
@@ -713,15 +759,31 @@ func publishLog(level, msg string, fields map[string]interface{}) {
 		entry[k] = v
 	}
 	payload, _ := json.Marshal(entry)
-	mqttClient.Publish(topic, 0, false, payload)
+	mqttPublish(topic, 0, false, payload)
 }
 
 // ---------- Command Handler ----------
 
 func handleCommand(client MQTT.Client, msg MQTT.Message) {
+	if len(msg.Payload()) > 1024 * 100 {
+		logger.Warn("command payload exceeds 100KB, rejecting")
+		return
+	}
 	var cmd CommandRequest
 	if err := json.Unmarshal(msg.Payload(), &cmd); err != nil {
 		logger.WithError(err).Warn("invalid command payload")
+		return
+	}
+
+	if cmd.ID == "" && cmd.CommandID != "" {
+		cmd.ID = cmd.CommandID
+	}
+	if cmd.ID == "" {
+		logger.Warn("command missing ID, rejecting")
+		return
+	}
+	if cmd.Type == "" {
+		logger.Warn("command missing type, rejecting")
 		return
 	}
 
@@ -832,7 +894,17 @@ func execShell(cmd CommandRequest) CommandResponse {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.Commands.Shell.Timeout)*time.Second)
 	defer cancel()
 
-	cmdObj := exec.CommandContext(ctx, "sh", "-c", payload.Command)
+	tokens := strings.Fields(payload.Command)
+	if len(tokens) == 0 {
+		return CommandResponse{ID: cmd.ID, Status: "rejected", Error: "empty command", Timestamp: time.Now().UTC().Format(time.RFC3339)}
+	}
+
+	var cmdObj *exec.Cmd
+	if len(tokens) == 1 {
+		cmdObj = exec.CommandContext(ctx, tokens[0])
+	} else {
+		cmdObj = exec.CommandContext(ctx, tokens[0], tokens[1:]...)
+	}
 	out, err := cmdObj.CombinedOutput()
 	if err != nil {
 		return CommandResponse{ID: cmd.ID, Status: "failed", Error: err.Error(), Result: string(out), Timestamp: time.Now().UTC().Format(time.RFC3339)}
@@ -859,13 +931,15 @@ func execFirmwareUpdate(cmd CommandRequest) CommandResponse {
 		return CommandResponse{ID: cmd.ID, Status: "failed", Error: fmt.Sprintf("download: %s", err), Timestamp: time.Now().UTC().Format(time.RFC3339)}
 	}
 
-	if payload.Checksum != "" {
-		data, _ := os.ReadFile(binPath)
-		hash := fmt.Sprintf("%x", md5.Sum(data))
-		if hash != payload.Checksum {
-			os.Remove(binPath)
-			return CommandResponse{ID: cmd.ID, Status: "failed", Error: "checksum mismatch", Timestamp: time.Now().UTC().Format(time.RFC3339)}
-		}
+	data, _ := os.ReadFile(binPath)
+	hash := fmt.Sprintf("%x", sha256.Sum256(data))
+	if payload.Checksum == "" {
+		os.Remove(binPath)
+		return CommandResponse{ID: cmd.ID, Status: "failed", Error: "checksum required", Timestamp: time.Now().UTC().Format(time.RFC3339)}
+	}
+	if hash != payload.Checksum {
+		os.Remove(binPath)
+		return CommandResponse{ID: cmd.ID, Status: "failed", Error: "checksum mismatch", Timestamp: time.Now().UTC().Format(time.RFC3339)}
 	}
 
 	if err := os.Chmod(binPath, 0755); err != nil {
@@ -933,7 +1007,9 @@ func execReadRegister(cmd CommandRequest) CommandResponse {
 		return CommandResponse{ID: cmd.ID, Status: "failed", Error: "invalid payload", Timestamp: time.Now().UTC().Format(time.RFC3339)}
 	}
 
+	modbusMu.RLock()
 	handler, ok := modbusPools[payload.Device]
+	modbusMu.RUnlock()
 	if !ok {
 		return CommandResponse{ID: cmd.ID, Status: "failed", Error: fmt.Sprintf("device '%s' not connected", payload.Device), Timestamp: time.Now().UTC().Format(time.RFC3339)}
 	}
@@ -951,12 +1027,16 @@ func execReadRegister(cmd CommandRequest) CommandResponse {
 }
 
 func sendCommandResponse(resp CommandResponse) {
-	if mqttClient == nil || !mqttClient.IsConnected() {
+	if resp.ID == "" {
 		return
 	}
-	topic := strings.ReplaceAll(cfg.MQTT.Topics.Command, "{device_id}", getDeviceID()) + "/response"
+	topic := strings.ReplaceAll(cfg.MQTT.Topics.Response, "{device_id}", getDeviceID())
+	if strings.Contains(topic, "{device_id}") {
+		return
+	}
+	resp.Success = resp.Status == "completed"
 	payload, _ := json.Marshal(resp)
-	mqttClient.Publish(topic, cfg.MQTT.QoS, false, payload)
+	mqttPublish(topic, cfg.MQTT.QoS, false, payload)
 }
 
 // ---------- System Monitoring ----------
@@ -1043,6 +1123,8 @@ func startWatchdog(ctx context.Context) {
 		return
 	}
 
+	startupGrace := time.Duration(cfg.Watchdog.Interval*cfg.Watchdog.MaxMissedPings) * time.Second
+
 	ticker := time.NewTicker(time.Duration(cfg.Watchdog.Interval) * time.Second)
 	defer ticker.Stop()
 
@@ -1054,6 +1136,9 @@ func startWatchdog(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if time.Since(startTime) < startupGrace {
+				continue
+			}
 			if !isConnected() {
 				missed++
 				logger.WithField("missed", missed).Warn("watchdog: MQTT disconnected")
@@ -1066,7 +1151,14 @@ func startWatchdog(ctx context.Context) {
 						exec.Command("sudo", "reboot").Run()
 					default:
 						if cfg.Watchdog.Action != "" {
-							exec.Command("sh", "-c", cfg.Watchdog.Action).Run()
+							tokens := strings.Fields(cfg.Watchdog.Action)
+							if len(tokens) > 0 {
+								if len(tokens) == 1 {
+									exec.Command(tokens[0]).Run()
+								} else {
+									exec.Command(tokens[0], tokens[1:]...).Run()
+								}
+							}
 						}
 					}
 					return
@@ -1158,13 +1250,17 @@ func downloadFile(path, url string) error {
 	}
 	defer resp.Body.Close()
 
+	if resp.ContentLength > 100*1024*1024 {
+		return fmt.Errorf("file too large: %d bytes", resp.ContentLength)
+	}
+
 	out, err := os.Create(path)
 	if err != nil {
 		return err
 	}
 	defer out.Close()
 
-	_, err = io.Copy(out, resp.Body)
+	_, err = io.Copy(out, io.LimitReader(resp.Body, 100*1024*1024))
 	return err
 }
 
@@ -1184,19 +1280,32 @@ func runTelemetryLoop(ctx context.Context) {
 				Timestamp: time.Now().UTC().Format(time.RFC3339),
 			}
 
-			telemetry.System = collectSystemMetrics()
+			sys := collectSystemMetrics()
+			telemetry.System = sys
+
+			// Extract flat fields for platform compatibility
+			if v, ok := sys["cpu_percent"].(float64); ok {
+				telemetry.CPU = v
+			}
+			if v, ok := sys["memory_percent"].(float64); ok {
+				telemetry.Memory = v
+			}
+			if v, ok := sys["disk"]; ok {
+				telemetry.Disk = v
+			}
+			if v, ok := sys["temperature_c"].(float64); ok {
+				telemetry.Temperature = v
+			}
 
 			// Check thresholds
-			if sys, ok := telemetry.System.(map[string]interface{}); ok {
-				if cpu, ok := sys["cpu_percent"].(float64); ok && cpu > float64(cfg.Monitoring.CPUThresholdWarn) {
-					logger.WithField("cpu", cpu).Warn("CPU threshold exceeded")
-				}
-				if mem, ok := sys["memory_percent"].(float64); ok && mem > float64(cfg.Monitoring.MemoryThresholdWarn) {
-					logger.WithField("memory", mem).Warn("Memory threshold exceeded")
-				}
-				if temp, ok := sys["temperature_c"].(float64); ok && temp > float64(cfg.Monitoring.TempThresholdWarn) {
-					logger.WithField("temperature", temp).Warn("Temperature threshold exceeded")
-				}
+			if telemetry.CPU > float64(cfg.Monitoring.CPUThresholdWarn) {
+				logger.WithField("cpu", telemetry.CPU).Warn("CPU threshold exceeded")
+			}
+			if telemetry.Memory > float64(cfg.Monitoring.MemoryThresholdWarn) {
+				logger.WithField("memory", telemetry.Memory).Warn("Memory threshold exceeded")
+			}
+			if telemetry.Temperature > float64(cfg.Monitoring.TempThresholdWarn) {
+				logger.WithField("temperature", telemetry.Temperature).Warn("Temperature threshold exceeded")
 			}
 
 			// Collect Modbus data from async collector
@@ -1270,10 +1379,15 @@ func runModbusLoop(ctx context.Context) {
 	}
 }
 
-func sendStatus(status string) {
+func sendStatus(status string, reason ...string) {
+	r := ""
+	if len(reason) > 0 {
+		r = reason[0]
+	}
 	s := StatusData{
 		DeviceID:    getDeviceID(),
 		Status:      status,
+		Reason:      r,
 		Uptime:      int64(time.Since(startTime).Seconds()),
 		Version:     version,
 		IP:          getIPAddress(),
@@ -1292,18 +1406,21 @@ func initGPIO() {
 	for _, s := range cfg.GPIO.Sensors {
 		if s.Mode == "output" {
 			pinStr := strconv.Itoa(s.Pin)
-			// Export the GPIO pin (idempotent; ignore error if already exported)
 			os.WriteFile("/sys/class/gpio/export", []byte(pinStr), 0644)
-			time.Sleep(30 * time.Millisecond)
-			// Set direction
-			dirPath := fmt.Sprintf("/sys/class/gpio/gpio%s/direction", pinStr)
+			gpioDir := fmt.Sprintf("/sys/class/gpio/gpio%s", pinStr)
+			for i := 0; i < 50; i++ {
+				if _, err := os.Stat(gpioDir); err == nil {
+					break
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			dirPath := gpioDir + "/direction"
 			os.WriteFile(dirPath, []byte("out"), 0644)
-			// Set default state
 			val := "0"
 			if s.Default {
 				val = "1"
 			}
-			valPath := fmt.Sprintf("/sys/class/gpio/gpio%s/value", pinStr)
+			valPath := gpioDir + "/value"
 			os.WriteFile(valPath, []byte(val), 0644)
 			logger.WithFields(logrus.Fields{"pin": s.Pin, "name": s.Name, "default": s.Default}).Info("GPIO output initialized")
 		}
@@ -1350,10 +1467,54 @@ func startConfigReloader() {
 			if newCfg.Monitoring.Interval <= 0 {
 				newCfg.Monitoring.Interval = 30
 			}
+			// Re-open log file if path changed
+			if newCfg.Logging.File != "" && newCfg.Logging.File != cfg.Logging.File {
+				if logFile != nil {
+					logFile.Close()
+					logFile = nil
+				}
+				f, err := os.OpenFile(newCfg.Logging.File, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+				if err == nil {
+					logFile = f
+					logger.SetOutput(io.MultiWriter(os.Stderr, f))
+				}
+			}
 			cfg = newCfg
 			logger.WithField("interval", cfg.Monitoring.Interval).Info("config reloaded")
 		}
 	}()
+}
+
+// ---------- Provisioning ----------
+
+func provisionGateway() {
+	if cfg.Gateway.ProvisionToken == "" || cfg.Gateway.PlatformURL == "" {
+		return
+	}
+	body := map[string]interface{}{
+		"token": cfg.Gateway.ProvisionToken,
+		"gateway": map[string]interface{}{
+			"deviceId":        getDeviceID(),
+			"name":            cfg.Gateway.Name,
+			"serialNumber":    cfg.Gateway.SerialNumber,
+			"tenantId":        cfg.Gateway.TenantID,
+			"firmwareVersion": version,
+		},
+	}
+	payload, _ := json.Marshal(body)
+	url := strings.TrimRight(cfg.Gateway.PlatformURL, "/") + "/api/v1/provisioning/gateway"
+	resp, err := http.Post(url, "application/json", strings.NewReader(string(payload)))
+	if err != nil {
+		logger.WithError(err).Warn("provisioning: request failed")
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		logger.Info("provisioning: gateway registered successfully")
+	} else {
+		body, _ := io.ReadAll(resp.Body)
+		logger.WithFields(logrus.Fields{"status": resp.StatusCode, "response": string(body)}).Warn("provisioning: unexpected response")
+	}
 }
 
 // ---------- Main ----------
@@ -1397,6 +1558,9 @@ func main() {
 	if cfg.MQTT.Topics.Command == "" {
 		cfg.MQTT.Topics.Command = "gateway/{device_id}/command/set"
 	}
+	if cfg.MQTT.Topics.Response == "" {
+		cfg.MQTT.Topics.Response = "gateway/{device_id}/command/response"
+	}
 
 	if cfg.Monitoring.Interval <= 0 {
 		cfg.Monitoring.Interval = 30
@@ -1432,6 +1596,7 @@ func main() {
 	if cfg.Logging.File != "" {
 		f, err := os.OpenFile(cfg.Logging.File, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 		if err == nil {
+			logFile = f
 			logger.SetOutput(io.MultiWriter(os.Stderr, f))
 		}
 	}
@@ -1472,12 +1637,14 @@ func main() {
 		"version":    version,
 	}).Info("Mango IoT Gateway Agent starting")
 
+	// Provision with platform (if token and URL configured)
+	provisionGateway()
+
 	// Connect MQTT
 	if err := mqttConnect(); err != nil {
 		logger.WithError(err).Fatal("MQTT connection failed")
 	}
 
-	// Initialize Modbus
 	if cfg.Modbus.Enabled {
 		for _, dev := range cfg.Modbus.Devices {
 			mh, err := newModbusHandler(dev)
@@ -1485,7 +1652,9 @@ func main() {
 				logger.WithError(err).WithField("device", dev.Name).Error("modbus init failed")
 				continue
 			}
+			modbusMu.Lock()
 			modbusPools[dev.Name] = mh
+			modbusMu.Unlock()
 			logger.WithField("device", dev.Name).Info("modbus device connected")
 		}
 	}
@@ -1528,17 +1697,32 @@ func main() {
 	sig := <-sigCh
 
 	logger.WithField("signal", sig.String()).Info("shutting down")
-	sendStatus("OFFLINE")
+
+	// Cancel all goroutine contexts first
+	cancel()
+
+	// Send final status
+	sendStatus("OFFLINE", "shutdown")
 	time.Sleep(500 * time.Millisecond)
 
-	// Cleanup
-	if healthSrv != nil {
-		healthSrv.stop()
+	// Graceful cleanup in order
+	mqttMu.Lock()
+	if mqttClient != nil && mqttClient.IsConnected() {
+		mqttClient.Disconnect(500)
 	}
+	mqttClient = nil
+	mqttMu.Unlock()
+
+	modbusMu.Lock()
 	for _, mh := range modbusPools {
 		mh.close()
 	}
-	if mqttClient != nil {
-		mqttClient.Disconnect(1000)
+	modbusMu.Unlock()
+
+	if healthSrv != nil {
+		healthSrv.stop()
+	}
+	if logFile != nil {
+		logFile.Close()
 	}
 }

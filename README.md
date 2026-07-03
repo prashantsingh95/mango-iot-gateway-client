@@ -58,9 +58,16 @@ Designed for production deployments — static binary, minimal dependencies, sys
 - Configurable levels (debug, info, warn, error)
 
 ### Provisioning
-- Token-based auto-registration with cloud platform
+- Token-based auto-registration with cloud platform via REST API
 - Automatic device ID from MAC address
 - Serial number detection from `/proc/cpuinfo`
+- `platform_url` config field enables auto-registration on startup
+
+### Uptime Tracking
+- 15-minute slot-based uptime monitoring
+- Platform scheduler aggregates slots from heartbeat data
+- Digital signal graph in gateway detail view (green/red timeline)
+- Uptime percentage per gateway (24h window)
 
 ---
 
@@ -196,6 +203,7 @@ gateway:
   name: "Factory Gateway"           # Human-readable name
   tenant_id: "default"              # Multi-tenant partition
   provision_token: ""               # Token for auto-registration
+  platform_url: ""                  # REST API base URL for provisioning
 
 mqtt:
   broker_url: "mqtt://10.0.0.1:1883"
@@ -215,6 +223,7 @@ mqtt:
     status: "gateway/{device_id}/status"
     log: "gateway/{device_id}/log"
     command: "gateway/{device_id}/command/set"
+    response: "gateway/{device_id}/command/response"
 
 modbus:
   enabled: false
@@ -362,8 +371,8 @@ Commands are sent by the cloud platform to `gateway/{device_id}/command/set`.
 | `gateway/{id}/telemetry` | → Cloud | 1 | No | Periodic system metrics |
 | `gateway/{id}/status` | → Cloud | 1 | Yes | Online/offline + uptime |
 | `gateway/{id}/log` | → Cloud | 0 | No | Log entries |
-| `gateway/{id}/command/response` | → Cloud | 1 | No | Command execution results |
-| `gateway/{id}/command/set` | Cloud → | 1 | No | Incoming commands |
+| `gateway/{id}/command/response` | → Cloud | 1 | No | Command execution results (with `success` bool) |
+| `gateway/{id}/command/set` | Cloud → | 1 | No | Incoming commands (with `commandId` field) |
 
 ---
 

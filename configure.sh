@@ -130,6 +130,7 @@ gateway:
   serial_number: ""
   tenant_id: "${TENANT_ID}"
   provision_token: "${TOKEN:-}"
+  platform_url: ""
 
 mqtt:
   broker_url: "${SERVER}"
@@ -150,6 +151,7 @@ mqtt:
     status: "gateway/{device_id}/status"
     log: "gateway/{device_id}/log"
     command: "gateway/{device_id}/command/set"
+    response: "gateway/{device_id}/command/response"
 
 modbus:
   enabled: false

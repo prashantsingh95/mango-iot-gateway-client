@@ -8,6 +8,7 @@ gateway:
   serial_number: ""                # Auto from /proc/cpuinfo if empty
   tenant_id: "default"
   provision_token: ""              # Set for auto-registration
+  platform_url: ""                 # e.g. https://platform.example.com
 
 mqtt:
   broker_url: "mqtt://localhost:1883"
@@ -28,6 +29,7 @@ mqtt:
     status: "gateway/{device_id}/status"
     log: "gateway/{device_id}/log"
     command: "gateway/{device_id}/command/set"
+    response: "gateway/{device_id}/command/response"
 
 modbus:
   enabled: false
