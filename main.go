@@ -1200,6 +1200,13 @@ func collectSystemMetrics() map[string]interface{} {
 		}
 	}
 
+	if cfg.Monitoring.CPU {
+		// Read Raspberry Pi core voltage via vcgencmd
+		if voltage := getCoreVoltage(); voltage > 0 {
+			metrics["voltage_v"] = voltage
+		}
+	}
+
 	return metrics
 }
 
@@ -1214,6 +1221,24 @@ func getCPUTemperature() float64 {
 		return -1
 	}
 	return temp / 1000.0
+}
+
+func getCoreVoltage() float64 {
+	data, err := exec.Command("vcgencmd", "measure_volts", "core").Output()
+	if err != nil {
+		return 0
+	}
+	// Output format: "volt=1.2000V"
+	parts := strings.Split(strings.TrimSpace(string(data)), "=")
+	if len(parts) != 2 {
+		return 0
+	}
+	vStr := strings.TrimSuffix(strings.TrimSpace(parts[1]), "V")
+	v, err := strconv.ParseFloat(vStr, 64)
+	if err != nil {
+		return 0
+	}
+	return v
 }
 
 // ---------- Watchdog ----------
