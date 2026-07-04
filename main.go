@@ -1195,6 +1195,9 @@ func collectSystemMetrics() map[string]interface{} {
 			metrics["network_tx_bytes"] = io[0].BytesSent
 		}
 		metrics["uptime_seconds"] = int64(time.Since(startTime).Seconds())
+		if signal := getWiFiSignal(); signal != 0 {
+			metrics["signal_dbm"] = signal
+		}
 	}
 
 	return metrics
@@ -1321,6 +1324,29 @@ func getMACAddress() string {
 		}
 	}
 	return ""
+}
+
+func getWiFiSignal() float64 {
+	data, err := os.ReadFile("/proc/net/wireless")
+	if err != nil {
+		return 0
+	}
+	scanner := bufio.NewScanner(strings.NewReader(string(data)))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.Contains(line, "wlan") {
+			fields := strings.Fields(line)
+			if len(fields) >= 4 {
+				// fields[2] is link quality, fields[3] is signal level in dBm
+				signalStr := strings.TrimRight(fields[3], ".")
+				signal, err := strconv.ParseFloat(signalStr, 64)
+				if err == nil {
+					return signal
+				}
+			}
+		}
+	}
+	return 0
 }
 
 func getModel() string {
