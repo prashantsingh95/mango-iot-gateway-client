@@ -15,7 +15,6 @@ import (
 	psLoad "github.com/shirou/gopsutil/v3/load"
 	psMem "github.com/shirou/gopsutil/v3/mem"
 	psNet "github.com/shirou/gopsutil/v3/net"
-	"github.com/sirupsen/logrus"
 )
 
 type TelemetryData struct {

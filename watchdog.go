@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sirupsen/logrus"
 )
 
 // ---------- Watchdog ----------

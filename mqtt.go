@@ -10,7 +10,6 @@ import (
 	"time"
 
 	MQTT "github.com/eclipse/paho.mqtt.golang"
-	"github.com/sirupsen/logrus"
 )
 
 // ---------- MQTT ----------

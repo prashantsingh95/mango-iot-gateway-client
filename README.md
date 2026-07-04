@@ -1,6 +1,14 @@
 # Mango IoT Gateway Client
 
-**Standalone Go agent for Raspberry Pi 3B/4B/5.** Connects to [Mango IoT Gateway Platform](https://github.com/mango-iot/gateway-platform) (or any MQTT broker) for cloud-based management, monitoring, and control of industrial IoT gateways.
+**Developed by Prashant Kumar** — Director & Founder, Tech Burst Solutions LLP
+
+**Business Contact:**
+- Email: business@techburstsolutions.in, iot.techburst@gmail.com
+- Phone/WhatsApp: +91 9310720730
+- Web: www.techburstsolutions.in
+- Office: New Delhi - 41, India
+
+**Standalone Go agent for Raspberry Pi 3B/4B/5.** Connects to Mango IoT Gateway Platform (or any MQTT broker) for cloud-based management, monitoring, and control of industrial IoT gateways.
 
 Designed for production deployments — static binary, minimal dependencies, systemd-managed lifecycle.
 
@@ -448,15 +456,29 @@ sudo systemctl daemon-reload
 
 ---
 
-## Files
+## Project Structure
 
 ```
 mango-iot-gateway-client/
-├── main.go       # Gateway agent (~1200 lines)
-├── go.mod        # Go module definition
-├── config.yml    # Configuration template
-├── setup.sh      # One-command Pi installer
-└── README.md     # This file
+├── main.go              # Entry point, globals, signal handling
+├── config.go            # Configuration structs + loader
+├── telemetry.go         # Telemetry/status data, system metrics collection
+├── mqtt.go              # MQTT client connect, publish, subscribe
+├── commands.go          # Remote command handling (reboot, shell, firmware)
+├── provisioning.go      # Token-based auto-registration
+├── firmware.go          # OTA firmware download helper
+├── modbus.go            # Modbus TCP/RTU collector
+├── gpio.go              # GPIO sensor/relay handling
+├── secrets.go           # AES-GCM secrets encryption
+├── health.go            # HTTP health check server
+├── state.go             # Agent state + telemetry buffer
+├── watchdog.go          # MQTT health ping watchdog
+├── helpers.go           # Device ID, serial, MAC, IP utilities
+├── go.mod / go.sum      # Go module dependencies
+├── config.yml           # Configuration template
+├── setup.sh             # One-command Pi installer
+├── configure.sh         # Interactive configuration helper
+└── README.md            # This file
 ```
 
 ---

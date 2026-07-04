@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/sirupsen/logrus"
 )
 
 // ---------- HTTP Health Server ----------
