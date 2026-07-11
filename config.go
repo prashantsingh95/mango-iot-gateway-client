@@ -123,6 +123,23 @@ type CommandsConfig struct {
 	Shell   ShellCommandConfig  `yaml:"shell"`
 }
 
+// TerminalConfig enables the reverse-connection remote terminal agent.
+// The agent dials OUT to the backend's Socket.IO /agent namespace (no inbound
+// ports). gateway_id defaults to the device id if unset.
+type TerminalConfig struct {
+	Enabled            bool   `yaml:"enabled"`
+	GatewayID          string `yaml:"gateway_id"`
+	BackendWSURL       string `yaml:"backend_ws_url"` // ws://host:3001 or wss://...
+	AgentSecret        string `yaml:"agent_secret"`   // issued by the platform
+	SigningPepper      string `yaml:"signing_pepper"` // MUST match backend TERMINAL_SIGNING_PEPPER
+	HeartbeatMs        int    `yaml:"heartbeat_ms"`
+	ReconnectBaseMs    int    `yaml:"reconnect_base_ms"`
+	ReconnectMaxMs     int    `yaml:"reconnect_max_ms"`
+	Shell              string `yaml:"shell"`
+	FileDir            string `yaml:"file_dir"` // base dir for uploads (defaults /tmp)
+	InsecureSkipVerify bool   `yaml:"insecure_skip_verify"`
+}
+
 type GatewayConfig struct {
 	DeviceID       string `yaml:"device_id"`
 	Name           string `yaml:"name"`
@@ -142,6 +159,7 @@ type Config struct {
 	OTA        OTAConfig         `yaml:"ota"`
 	Watchdog   WatchdogConfig    `yaml:"watchdog"`
 	Commands   CommandsConfig    `yaml:"commands"`
+	Terminal   TerminalConfig    `yaml:"terminal"`
 }
 
 func configPath() string {

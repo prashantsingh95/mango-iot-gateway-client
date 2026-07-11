@@ -32,6 +32,13 @@ Designed for production deployments — static binary, minimal dependencies, sys
 | `set_relay` | Control GPIO relay output |
 | `read_register` | Read a Modbus register value |
 
+### Remote Terminal (Reverse-Connection)
+- The agent opens an **outbound TLS WebSocket** to the platform `/agent` namespace — no inbound ports, works behind NAT/CGNAT/firewall.
+- Authenticated with gateway id + secret; all traffic HMAC-signed (replay-protected).
+- 30s heartbeat with exponential-backoff reconnect, offline detection.
+- PTY shell sessions (xterm.js in the browser); SCP-like file upload/download over the same channel.
+- Enable via the `terminal:` config block (see Configuration Reference).
+
 ### Industrial Protocol Support
 - **Modbus TCP** — Connect to Modbus devices over TCP/IP
 - **Modbus RTU** — Connect via serial (RS-232/RS-485)
@@ -110,14 +117,19 @@ Designed for production deployments — static binary, minimal dependencies, sys
 │  │  │ System  │  │ Modbus   │  │ Relay  │  │   │
 │  │  │ Monitor │  │ Devices  │  │ Control│  │   │
 │  │  └─────────┘  └──────────┘  └────────┘  │   │
-│  └──────────────────┬───────────────────────┘   │
-│                     │                            │
-│                     ▼ MQTT (TLS)                 │
-│              ┌──────────────┐                    │
-│              │   Cloud      │                    │
-│              │   Server     │                    │
-│              │  (Platform)  │                    │
-│              └──────────────┘                    │
+│  │  ┌──────────────────────────────────┐   │   │
+│  │  │ Terminal Agent (PTY + file xfer) │   │   │
+│  │  │ outbound TLS WS → /agent         │   │   │
+│  │  └──────────────────┬───────────────┘   │   │
+│  └──────────┬───────────┴───────────────────┘   │
+│             │  ┌────────────┐                   │
+│             │  │  MQTT (TLS) │                   │
+│             └─▶└──────┬─────┘                   │
+│                ┌─────┴────────┐                  │
+│                │   Cloud      │  ◀── Terminal WS │
+│                │   Server     │      (/agent)    │
+│                │  (Platform)  │                  │
+│                └──────────────┘                  │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -128,7 +140,7 @@ Designed for production deployments — static binary, minimal dependencies, sys
 ### 1. Deploy Platform First (on your server)
 
 ```bash
-git clone https://github.com/mango-iot/gateway-platform.git
+git clone https://github.com/prashantsingh95/mango-iot-gateway-platform.git
 cd mango-iot-gateway-platform
 sudo bash setup-server.sh
 ```
@@ -155,13 +167,34 @@ sudo bash setup.sh \
   --name "Factory Gateway #1"
 ```
 
-### 3. Enable Terminal Access (SSH)
-In platform UI: **Settings** → add:
-- `sshUsername`: your Pi username (e.g., `pi`)
-- `sshPassword`: your Pi SSH password
-- `sshPort`: 22
+### 3. Enable Remote Terminal (Reverse-Connection)
+The browser terminal does **not** use SSH. This agent opens an **outbound TLS
+WebSocket** to the platform's `/agent` Socket.IO namespace — no inbound ports,
+works behind NAT/CGNAT/firewall.
 
-Now you can open **Terminal** tab in gateway detail view!
+**a) Issue an agent secret** (Admin) from the platform API or UI:
+```bash
+curl -X POST "$PLATFORM_URL/api/v1/gateways/<GATEWAY_ID>/agent-secret" \
+  -H "Authorization: Bearer $TOKEN"
+# => { "gatewayId": "...", "secret": "<ONE-TIME SECRET>", "backendUrl": "wss://..." }
+```
+
+**b) Configure and enable the terminal agent** in `/opt/gateway/config.yml`:
+```yaml
+terminal:
+  enabled: true
+  backend_ws_url: "wss://your-platform.example.com"   # from backendUrl above
+  agent_secret: "<ONE-TIME SECRET>"
+  signing_pepper: "<MUST MATCH backend TERMINAL_SIGNING_PEPPER>"
+  shell: "/bin/bash"
+  file_dir: "/tmp"
+sudo systemctl restart gateway-agent
+```
+Once the agent shows connected in the platform gateway view, open the
+**Terminal** tab for a multi-tab, resizable shell with file upload/download.
+
+> The platform also ships a standalone Node reference agent in
+> `gateway-agent/` if you prefer not to enable the terminal module here.
 
 ---
 
@@ -305,7 +338,20 @@ commands:
     allowed_paths:                  # Restricted shell paths
       - "/opt/gateway/scripts/"
       - "/usr/local/bin/"
-    timeout: 30                     # Shell command timeout (s)
+    timeout: 30                      # Shell command timeout (s)
+
+terminal:                            # Reverse-connection remote terminal agent
+  enabled: false
+  gateway_id: ""                     # Defaults to gateway.device_id
+  backend_ws_url: "ws://localhost:3001"   # wss://... in production
+  agent_secret: ""                   # One-time secret from platform /agent-secret
+  signing_pepper: ""                 # MUST match backend TERMINAL_SIGNING_PEPPER
+  heartbeat_ms: 30000
+  reconnect_base_ms: 1000
+  reconnect_max_ms: 30000
+  shell: "/bin/bash"
+  file_dir: "/tmp"                   # Base dir for uploaded files
+  insecure_skip_verify: false        # true only for self-signed test backends
 ```
 
 ---
@@ -404,7 +450,7 @@ Commands are sent by the cloud platform to `gateway/{device_id}/command/set`.
 ### Build locally
 
 ```bash
-git clone https://github.com/mango-iot/gateway-client.git
+git clone https://github.com/prashantsingh95/mango-iot-gateway-client.git
 cd gateway-client
 go mod download
 CGO_ENABLED=0 go build -ldflags="-s -w" -o gateway-agent .
@@ -439,6 +485,9 @@ GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o gateway-agent-arm64 .
 | Firmware update fails | Check URL reachability, checksum match, disk space |
 | Provisioning fails | Verify token is active in cloud platform |
 | High CPU usage | Reduce `monitoring.interval` or disable unused modules |
+| Terminal shows "Agent offline" | `terminal.enabled: true`, `backend_ws_url` & `agent_secret` set, platform reachable over WS; check agent logs |
+| Terminal "Invalid gateway credentials" | `agent_secret` mismatch or not issued via platform `/agent-secret` |
+| Terminal "Message signature invalid" | `signing_pepper` on agent ≠ backend `TERMINAL_SIGNING_PEPPER` (must match) |
 
 ---
 

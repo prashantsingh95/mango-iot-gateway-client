@@ -102,6 +102,23 @@ func main() {
 		cfg.MQTT.MaxReconnectDelay = 60
 	}
 
+	// Terminal (reverse-connection agent) defaults
+	if cfg.Terminal.HeartbeatMs <= 0 {
+		cfg.Terminal.HeartbeatMs = 30000
+	}
+	if cfg.Terminal.ReconnectBaseMs <= 0 {
+		cfg.Terminal.ReconnectBaseMs = 1000
+	}
+	if cfg.Terminal.ReconnectMaxMs <= 0 {
+		cfg.Terminal.ReconnectMaxMs = 30000
+	}
+	if cfg.Terminal.Shell == "" {
+		cfg.Terminal.Shell = "/bin/bash"
+	}
+	if cfg.Terminal.FileDir == "" {
+		cfg.Terminal.FileDir = "/tmp"
+	}
+
 	// Setup logging
 	switch cfg.Logging.Level {
 	case "debug":
@@ -193,6 +210,12 @@ func main() {
 	go runTelemetryLoop(ctx)
 	go runModbusLoop(ctx)
 	go startWatchdog(ctx)
+
+	// Reverse-connection terminal agent (optional)
+	if cfg.Terminal.Enabled && cfg.Terminal.BackendWSURL != "" && cfg.Terminal.AgentSecret != "" {
+		go startTerminalAgent(ctx)
+		logger.Info("terminal agent: enabled (reverse-connection)")
+	}
 
 	// Start HTTP health endpoint on localhost:8090
 	healthSrv = newHealthServer("127.0.0.1:8090")

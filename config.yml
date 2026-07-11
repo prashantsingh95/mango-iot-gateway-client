@@ -109,3 +109,19 @@ commands:
       - "/opt/gateway/scripts/"
       - "/usr/local/bin/"
     timeout: 30                    # Seconds before shell command timeout
+
+# Reverse-connection remote terminal. When enabled, the agent opens an OUTBOUND
+# TLS WebSocket to the backend /agent namespace (no inbound ports). Obtain
+# agent_secret from the platform: POST /gateways/:id/agent-secret (Admin).
+terminal:
+  enabled: false
+  gateway_id: ""                   # Defaults to gateway.device_id
+  backend_ws_url: "ws://localhost:3001"   # wss://... in production
+  agent_secret: ""                 # One-time secret issued by the platform
+  signing_pepper: ""               # MUST match backend TERMINAL_SIGNING_PEPPER
+  heartbeat_ms: 30000
+  reconnect_base_ms: 1000
+  reconnect_max_ms: 30000
+  shell: "/bin/bash"
+  file_dir: "/tmp"                 # Base directory for uploaded files
+  insecure_skip_verify: false      # Set true only for self-signed test backends
