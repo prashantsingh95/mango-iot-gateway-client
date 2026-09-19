@@ -32,11 +32,26 @@ func cfTunnelCredPath() string {
 	return filepath.Join(filepath.Dir(configPath()), "cloudflare-tunnel-token")
 }
 
+func cfTunnelCredentialsPath() string {
+	return filepath.Join(filepath.Dir(configPath()), "cloudflare-credentials.json")
+}
+
+func cfTunnelConfigYmlPath() string {
+	return filepath.Join(filepath.Dir(configPath()), "cloudflared.yml")
+}
+
 type cfTunnelFile struct {
 	TunnelID   string `json:"tunnelId"`
 	TunnelName string `json:"tunnelName"`
 	Hostname   string `json:"hostname"`
 	Token      string `json:"token"`
+}
+
+type cloudflaredCredentials struct {
+	AccountTag   string `json:"AccountTag"`
+	TunnelID     string `json:"TunnelID"`
+	TunnelName   string `json:"TunnelName,omitempty"`
+	TunnelSecret string `json:"TunnelSecret"`
 }
 
 func startCloudflareTunnel(ctx context.Context) {
@@ -80,9 +95,6 @@ func (m *cfTunnelManager) runLoop(ctx context.Context) {
 }
 
 func (m *cfTunnelManager) ensureConfig() error {
-	// Token may arrive via provisioned config (cloudflare_tunnel.token) or via separate credential endpoint.
-	// We persist minimal file for cloudflared; cloudflared itself is started with `cloudflared tunnel run --token <token>`
-	// where supported, otherwise via config file.
 	if m.cfg.AgentSecret == "" {
 		return fmt.Errorf("tunnel token not configured")
 	}
@@ -90,13 +102,32 @@ func (m *cfTunnelManager) ensureConfig() error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
-	// Write token file 0600 (never log contents)
+	// Write token file 0600 (never log contents) — legacy fallback
 	tokenPath := cfTunnelCredPath()
 	if err := os.WriteFile(tokenPath, []byte(m.cfg.AgentSecret), 0600); err != nil {
 		return err
 	}
-	// Write json descriptor for health checks
-	desc := cfTunnelFile{Token: m.cfg.AgentSecret, Hostname: m.cfg.BackendWSURL}
+	// Write credentials JSON 0600 for --credentials-file (secure, not --token)
+	// If TunnelID/AccountTag are known, use full credentials file; otherwise token-only will use env var
+	if m.cfg.TunnelID != "" && m.cfg.AccountTag != "" {
+		creds := cloudflaredCredentials{
+			AccountTag:   m.cfg.AccountTag,
+			TunnelID:     m.cfg.TunnelID,
+			TunnelSecret: m.cfg.AgentSecret,
+		}
+		credsPath := cfTunnelCredentialsPath()
+		rawCreds, _ := json.Marshal(creds)
+		if err := os.WriteFile(credsPath, rawCreds, 0600); err != nil {
+			return err
+		}
+		// Write config.yml that points to credentials file (0600)
+		configYml := fmt.Sprintf("tunnel: %s\ncredentials-file: %s\n", m.cfg.TunnelID, credsPath)
+		if err := os.WriteFile(cfTunnelConfigYmlPath(), []byte(configYml), 0600); err != nil {
+			return err
+		}
+	}
+	// Write json descriptor for health checks (contains hostname, not secret)
+	desc := cfTunnelFile{TunnelID: m.cfg.TunnelID, Hostname: m.cfg.BackendWSURL}
 	raw, _ := json.Marshal(desc)
 	_ = os.WriteFile(m.path, raw, 0600)
 	return nil
@@ -119,9 +150,24 @@ func (m *cfTunnelManager) startOnce(ctx context.Context) error {
 			return fmt.Errorf("cloudflared missing")
 		}
 	}
-	token, _ := os.ReadFile(tokenPath)
+	// Prefer credentials-file (secure, not `ps` visible) if available
+	credsPath := cfTunnelCredentialsPath()
+	configPath := cfTunnelConfigYmlPath()
+	var cmd *exec.Cmd
+	if _, err := os.Stat(credsPath); err == nil {
+		if _, err := os.Stat(configPath); err == nil {
+			cmd = exec.CommandContext(ctx, bin, "tunnel", "run", "--config", configPath)
+		} else {
+			cmd = exec.CommandContext(ctx, bin, "tunnel", "run", "--credentials-file", credsPath)
+		}
+	} else {
+		// Fallback: token via env var (not --token on command line) — still not in `ps`
+		token, _ := os.ReadFile(tokenPath)
+		cmd = exec.CommandContext(ctx, bin, "tunnel", "run")
+		cmd.Env = append(os.Environ(), "TUNNEL_TOKEN="+string(token))
+	}
 	m.mu.Lock()
-	m.cmd = exec.CommandContext(ctx, bin, "tunnel", "run", "--token", string(token))
+	m.cmd = cmd
 	m.cmd.Stdout = os.Stdout
 	m.cmd.Stderr = os.Stderr
 	err = m.cmd.Start()
@@ -129,7 +175,7 @@ func (m *cfTunnelManager) startOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	logger.WithField("hostname", m.cfg.BackendWSURL).Info("cloudflare tunnel: cloudflared started")
+	logger.WithField("hostname", m.cfg.BackendWSURL).Info("cloudflare tunnel: cloudflared started (credentials-file, not --token)")
 	done := make(chan error, 1)
 	go func() { done <- m.cmd.Wait() }()
 	select {

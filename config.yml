@@ -42,7 +42,7 @@ mqtt:
   client_key: ""                   # Path to client key for TLS
   qos: 1
   keep_alive: 60
-  clean_session: true
+  clean_session: false
   reconnect_delay: 5
   max_reconnect_delay: 60
   topics:

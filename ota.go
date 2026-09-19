@@ -32,7 +32,12 @@ func otaPendingPath() string {
 // verifyArtifactSignature checks a hex ed25519 signature over the raw binary.
 // The public key is operator-pinned in ota.signing_key (provisioned securely,
 // never via the same channel as the artifact).
+// Signature may be `hex` or `keyId:hex` (server stores keyId:hex).
 func verifyArtifactSignature(data []byte, sigHex, pubHex string) error {
+	// Handle keyId prefix: "primary:abc123..." → "abc123..."
+	if idx := lastIndex(sigHex, ":"); idx >= 0 {
+		sigHex = sigHex[idx+1:]
+	}
 	sig, err := hex.DecodeString(sigHex)
 	if err != nil || len(sig) != ed25519.SignatureSize {
 		return fmt.Errorf("malformed signature")
@@ -45,6 +50,15 @@ func verifyArtifactSignature(data []byte, sigHex, pubHex string) error {
 		return fmt.Errorf("signature verification failed")
 	}
 	return nil
+}
+
+func lastIndex(s, substr string) int {
+	for i := len(s) - len(substr); i >= 0; i-- {
+		if s[i:i+len(substr)] == substr {
+			return i
+		}
+	}
+	return -1
 }
 
 func armOtaPendingMarker(version string) {

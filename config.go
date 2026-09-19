@@ -168,7 +168,9 @@ type CloudflareTunnelConfig struct {
 	Enabled            bool   `yaml:"enabled"`
 	GatewayID          string `yaml:"gateway_id"`           // defaults to gateway.device_id
 	BackendWSURL       string `yaml:"backend_ws_url"`       // wss://host:3001 or wss://...
-	AgentSecret        string `yaml:"agent_secret"`         // issued by the platform
+	AgentSecret        string `yaml:"agent_secret"`         // issued by the platform (tunnel token, 0600 file)
+	TunnelID           string `yaml:"tunnel_id"`            // Cloudflare tunnel ID (for credentials-file)
+	AccountTag         string `yaml:"account_tag"`          // Cloudflare account tag (for credentials-file)
 	SigningPepper      string `yaml:"signing_pepper"`       // MUST match backend TERMINAL_SIGNING_PEPPER
 	HeartbeatMs        int    `yaml:"heartbeat_ms"`
 	ReconnectBaseMs    int    `yaml:"reconnect_base_ms"`

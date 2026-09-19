@@ -300,10 +300,12 @@ func execFirmwareUpdate(cmd CommandRequest) CommandResponse {
 	if payload.Checksum == "" {
 		return CommandResponse{ID: cmd.ID, Status: "failed", Error: "checksum required", Timestamp: time.Now().UTC().Format(time.RFC3339)}
 	}
-	// Phase 5 / §19 — signature is mandatory when a signing key is configured.
-	// A checksum alone is attacker-controlled (same channel as the binary).
-	if cfg.OTA.SigningKey != "" && payload.Signature == "" {
-		return CommandResponse{ID: cmd.ID, Status: "rejected", Error: "signature required (ota.signing_key configured)", Timestamp: time.Now().UTC().Format(time.RFC3339)}
+	// P0 #3: Mandatory Ed25519 — production OTA must be signed. No unsigned fallback.
+	if payload.Signature == "" {
+		return CommandResponse{ID: cmd.ID, Status: "rejected", Error: "signature required (OTA must be signed)", Timestamp: time.Now().UTC().Format(time.RFC3339)}
+	}
+	if cfg.OTA.SigningKey == "" {
+		return CommandResponse{ID: cmd.ID, Status: "failed", Error: "ota.signing_key not configured — cannot verify signature", Timestamp: time.Now().UTC().Format(time.RFC3339)}
 	}
 
 	logger.WithFields(logrus.Fields{"version": version, "url": url}).Info("starting firmware update")
