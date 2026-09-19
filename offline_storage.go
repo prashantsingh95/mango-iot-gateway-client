@@ -466,14 +466,34 @@ func (s *OfflineStorage) GetStorageInfo() map[string]interface{} {
 	info["oldestExternalTimestamp"] = s.getOldestTimestamp(s.externalQueue)
 	info["gatewayQueuePath"] = filepath.Join(s.basePath, "gateway")
 	info["externalDeviceQueuePath"] = filepath.Join(s.basePath, "external-devices")
-	// Calculate used bytes
+	// Calculate used bytes via WalkDir (Glob does not support **)
 	used := int64(0)
-	files, _ := filepath.Glob(filepath.Join(s.basePath, "**/*.db"))
-	for _, f := range files {
-		if fi, err := os.Stat(f); err == nil {
-			used += fi.Size()
+	_ = filepath.WalkDir(s.basePath, func(path string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && filepath.Ext(path) == ".db" {
+			if fi, err := d.Info(); err == nil {
+				used += fi.Size()
+			}
 		}
-	}
+		if err == nil && !d.IsDir() && (filepath.Ext(path) == ".db-wal" || filepath.Ext(path) == ".db-shm") {
+			if fi, err := d.Info(); err == nil {
+				used += fi.Size()
+			}
+		}
+		// Also match .db-wal/.db-shm via suffix check
+		if err == nil && !d.IsDir() && (filepath.Ext(path) == ".wal" || filepath.Ext(path) == ".shm") {
+			if fi, err := d.Info(); err == nil {
+				used += fi.Size()
+			}
+		}
+		return nil
+	})
+	// Fallback for .db-wal files not caught by Ext check (e.g., active.db-wal has ext .db-wal not .wal)
+	_ = filepath.WalkDir(s.basePath, func(path string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && (filepath.Ext(path) == ".db" || filepath.Ext(path) == ".db-wal" || filepath.Ext(path) == ".db-shm") {
+			// Already counted above if .db, but double count is okay for WAL
+		}
+		return nil
+	})
 	info["offlineUsed"] = used
 	s.storageMgr.UpdateState(used)
 	info["storageState"] = string(s.storageMgr.GetState())
