@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,6 +29,9 @@ import (
 type ptySession struct {
 	file *os.File
 	cmd  *exec.Cmd
+	// Phase 5 — session lifetime enforcement.
+	startedAt  time.Time
+	lastActive time.Time
 }
 
 type terminalAgent struct {
@@ -41,6 +45,7 @@ type terminalAgent struct {
 	lastSeq    int64
 	sessions   map[string]*ptySession
 	uploads    map[string]*os.File
+	uploadBytes map[string]int64
 	pingStart  int64
 }
 
@@ -50,6 +55,7 @@ func startTerminalAgent(ctx context.Context) {
 		key:     deriveSigningKey(hashAgentSecret(cfg.Terminal.AgentSecret), cfg.Terminal.SigningPepper),
 		sessions: make(map[string]*ptySession),
 		uploads:  make(map[string]*os.File),
+		uploadBytes: make(map[string]int64),
 	}
 
 	backoff := time.Duration(cfg.Terminal.ReconnectBaseMs) * time.Millisecond
@@ -98,6 +104,9 @@ func (a *terminalAgent) wsURL() string {
 func (a *terminalAgent) connect(ctx context.Context) error {
 	dialer := websocket.Dialer{HandshakeTimeout: 15 * time.Second}
 	if a.cfg.InsecureSkipVerify {
+		// Test-only escape hatch: certificate verification OFF. Never enable
+		// in production — the agent cannot tell the platform from an imposter.
+		logger.Error("terminal agent: TLS verification DISABLED (insecure_skip_verify) — test use only")
 		dialer.TLSClientConfig = tlsConfigInsecure()
 	}
 	conn, _, err := dialer.Dial(a.wsURL(), nil)
@@ -285,11 +294,34 @@ func (a *terminalAgent) handleSessionStart(msg *TerminalMessage) {
 	a.mu.Unlock()
 
 	shell := a.cfg.Shell
-	if s, ok := p["shell"].(string); ok && s != "" {
-		shell = s
+	if s, ok := p["shell"].(string); ok && s != "" && s != shell {
+		// Phase 5 / §27 — the backend may SUGGEST a shell, never impose one.
+		// Only shells on the local allowlist are honored; anything else keeps
+		// the pinned default (and is logged for audit).
+		allowed := false
+		for _, a := range a.cfg.ShellAllowlist {
+			if s == a {
+				allowed = true
+				break
+			}
+		}
+		if allowed {
+			shell = s
+		} else {
+			logger.WithFields(map[string]interface{}{"requested": s, "session": sessionID}).Warn("terminal agent: rejecting non-allowlisted shell")
+		}
 	}
 	cols, _ := toUint16(p["cols"], 80)
 	rows, _ := toUint16(p["rows"], 24)
+
+	// Phase 5 — concurrent session cap (fail closed, audited).
+	a.mu.Lock()
+	if len(a.sessions) >= a.maxSessions() {
+		a.mu.Unlock()
+		a.sendMessage(msgError, map[string]interface{}{"message": "too many terminal sessions"}, sessionID)
+		return
+	}
+	a.mu.Unlock()
 
 	cmd := exec.Command(shell)
 	f, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: rows, Cols: cols})
@@ -298,9 +330,13 @@ func (a *terminalAgent) handleSessionStart(msg *TerminalMessage) {
 		return
 	}
 
+	now := time.Now()
 	a.mu.Lock()
-	a.sessions[sessionID] = &ptySession{file: f, cmd: cmd}
+	a.sessions[sessionID] = &ptySession{file: f, cmd: cmd, startedAt: now, lastActive: now}
 	a.mu.Unlock()
+
+	// Phase 5 — idle + absolute lifetime reaper for THIS session.
+	go a.reapSession(sessionID)
 
 	// pump PTY output -> backend
 	go func() {
@@ -330,6 +366,74 @@ func (a *terminalAgent) handleSessionStart(msg *TerminalMessage) {
 	logger.WithField("session", sessionID).Info("terminal agent: spawned PTY")
 }
 
+func (a *terminalAgent) maxSessions() int {
+	if a.cfg.MaxSessions > 0 {
+		return a.cfg.MaxSessions
+	}
+	return 5
+}
+
+// reapSession kills a PTY when it idles past IdleTimeoutMinutes or lives past
+// MaxSessionHours. Ticks at 1/6th of the idle window (min 1m) to bound drift.
+func (a *terminalAgent) reapSession(sessionID string) {
+	idle := time.Duration(a.cfg.IdleTimeoutMinutes) * time.Minute
+	if idle <= 0 {
+		idle = 30 * time.Minute
+	}
+	maxLife := time.Duration(a.cfg.MaxSessionHours) * time.Hour
+	if maxLife <= 0 {
+		maxLife = 8 * time.Hour
+	}
+	tick := idle / 6
+	if tick < time.Minute {
+		tick = time.Minute
+	}
+	if tick > maxLife {
+		tick = maxLife
+	}
+	t := time.NewTicker(tick)
+	defer t.Stop()
+	for range t.C {
+		a.mu.Lock()
+		sess, ok := a.sessions[sessionID]
+		var idleFor, age time.Duration
+		if ok {
+			idleFor = time.Since(sess.lastActive)
+			age = time.Since(sess.startedAt)
+		}
+		a.mu.Unlock()
+		if !ok {
+			return // session already closed
+		}
+		if idleFor >= idle || age >= maxLife {
+			reason := "idle timeout"
+			if age >= maxLife {
+				reason = "max session lifetime"
+			}
+			logger.WithFields(map[string]interface{}{"session": sessionID, "reason": reason}).Warn("terminal agent: reaping session")
+			a.sendMessage(msgSessionEnd, map[string]interface{}{"reason": reason}, sessionID)
+			a.mu.Lock()
+			if s, ok := a.sessions[sessionID]; ok {
+				_ = s.file.Close()
+				if s.cmd.Process != nil {
+					_ = s.cmd.Process.Kill()
+				}
+				delete(a.sessions, sessionID)
+			}
+			a.mu.Unlock()
+			return
+		}
+	}
+}
+
+func (a *terminalAgent) touchSession(sessionID string) {
+	a.mu.Lock()
+	if s, ok := a.sessions[sessionID]; ok {
+		s.lastActive = time.Now()
+	}
+	a.mu.Unlock()
+}
+
 func (a *terminalAgent) handleSessionData(msg *TerminalMessage) {
 	data, ok := msg.Payload["data"].(string)
 	if !ok {
@@ -341,6 +445,9 @@ func (a *terminalAgent) handleSessionData(msg *TerminalMessage) {
 	}
 	a.mu.Lock()
 	sess := a.sessions[msg.SessionID]
+	if sess != nil {
+		sess.lastActive = time.Now()
+	}
 	a.mu.Unlock()
 	if sess != nil {
 		_, _ = sess.file.Write(raw)
@@ -351,6 +458,7 @@ func (a *terminalAgent) handleSessionResize(msg *TerminalMessage) {
 	p := msg.Payload
 	cols, _ := toUint16(p["cols"], 80)
 	rows, _ := toUint16(p["rows"], 24)
+	a.touchSession(msg.SessionID)
 	a.mu.Lock()
 	sess := a.sessions[msg.SessionID]
 	a.mu.Unlock()
@@ -372,47 +480,90 @@ func (a *terminalAgent) handleSessionEnd(msg *TerminalMessage) {
 
 // ---------- file transfer ----------
 
+// jailPath resolves p inside the configured file dir and rejects escapes
+// (absolute paths outside the jail, ".." traversal, symlink breakouts).
+func (a *terminalAgent) jailPath(p string) (string, error) {
+	dir := a.cfg.FileDir
+	if dir == "" {
+		dir = "/tmp"
+	}
+	jailAbs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", err
+	}
+	candidate := p
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(jailAbs, candidate)
+	}
+	cleaned := filepath.Clean(candidate)
+	rel, err := filepath.Rel(jailAbs, cleaned)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path escapes file directory")
+	}
+	resolved, err := filepath.EvalSymlinks(cleaned)
+	if err != nil {
+		// Missing file (upload target): enforce the lexical jail only.
+		if os.IsNotExist(err) {
+			return cleaned, nil
+		}
+		return "", err
+	}
+	if rel2, err := filepath.Rel(jailAbs, resolved); err != nil || rel2 == ".." || strings.HasPrefix(rel2, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("symlink escapes file directory")
+	}
+	return resolved, nil
+}
+
 func (a *terminalAgent) handleFileInit(msg *TerminalMessage) {
 	p := msg.Payload
 	direction, _ := p["direction"].(string)
 	remotePath, _ := p["path"].(string)
 	sessionID := msg.SessionID
+	maxBytes := a.cfg.MaxFileBytes
+	if maxBytes <= 0 {
+		maxBytes = 25 * 1024 * 1024
+	}
 
 	if direction == "upload" {
-		if strings.Contains(remotePath, "..") {
+		// Uploads land inside the jail under the client basename (never
+		// attacker-controlled directories).
+		target, err := a.jailPath(filepath.Base(remotePath))
+		if err != nil {
 			a.sendMessage(msgError, map[string]interface{}{"message": "invalid path"}, sessionID)
 			return
 		}
-		dir := a.cfg.FileDir
-		if dir == "" {
-			dir = "/tmp"
-		}
-		target := filepath.Join(dir, filepath.Base(remotePath))
-		f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+		f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 		if err != nil {
 			a.sendMessage(msgError, map[string]interface{}{"message": err.Error()}, sessionID)
 			return
 		}
 		a.mu.Lock()
 		a.uploads[sessionID] = f
+		a.uploadBytes[sessionID] = 0
 		a.mu.Unlock()
 		a.sendMessage(msgFileTransferStatus, map[string]interface{}{"status": "ready", "path": target}, sessionID)
 	} else {
-		// download: stream the file back to the browser
-		if strings.Contains(remotePath, "..") || !pathExists(remotePath) {
-			a.sendMessage(msgError, map[string]interface{}{"message": "file not found: " + remotePath}, sessionID)
+		// Phase 5 / §27 — downloads are jailed to FileDir (previously ANY
+		// absolute path was readable, e.g. /etc/shadow) and size-capped.
+		resolved, err := a.jailPath(remotePath)
+		if err != nil || !pathExists(resolved) {
+			a.sendMessage(msgError, map[string]interface{}{"message": "file not found"}, sessionID)
 			return
 		}
-		info, _ := os.Stat(remotePath)
+		info, err := os.Stat(resolved)
+		if err != nil || info.IsDir() || info.Size() > maxBytes {
+			a.sendMessage(msgError, map[string]interface{}{"message": "file not available"}, sessionID)
+			return
+		}
 		a.sendMessage(msgFileTransferInit, map[string]interface{}{
 			"direction": "download",
-			"path":      remotePath,
+			"path":      resolved,
 			"size":      info.Size(),
 			"mode":      int(info.Mode().Perm()),
 		}, sessionID)
 
 		go func() {
-			f, err := os.Open(remotePath)
+			f, err := os.Open(resolved)
 			if err != nil {
 				a.sendMessage(msgError, map[string]interface{}{"message": err.Error()}, sessionID)
 				return
@@ -444,11 +595,26 @@ func (a *terminalAgent) handleFileData(msg *TerminalMessage) {
 	if err != nil {
 		return
 	}
+	maxBytes := a.cfg.MaxFileBytes
+	if maxBytes <= 0 {
+		maxBytes = 25 * 1024 * 1024
+	}
 	a.mu.Lock()
 	f := a.uploads[msg.SessionID]
-	a.mu.Unlock()
+	written := a.uploadBytes[msg.SessionID]
+	var over bool
 	if f != nil {
-		_, _ = f.Write(raw)
+		if int64(len(raw)) + written > maxBytes {
+			over = true
+		} else {
+			if _, err := f.Write(raw); err == nil {
+				a.uploadBytes[msg.SessionID] = written + int64(len(raw))
+			}
+		}
+	}
+	a.mu.Unlock()
+	if over {
+		a.sendMessage(msgError, map[string]interface{}{"message": "upload exceeds size limit"}, msg.SessionID)
 	}
 }
 
@@ -456,6 +622,7 @@ func (a *terminalAgent) handleFileEnd(msg *TerminalMessage) {
 	a.mu.Lock()
 	f := a.uploads[msg.SessionID]
 	delete(a.uploads, msg.SessionID)
+	delete(a.uploadBytes, msg.SessionID)
 	a.mu.Unlock()
 	if f != nil {
 		_ = f.Close()

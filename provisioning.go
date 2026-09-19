@@ -4,10 +4,14 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/sirupsen/logrus"
 )
+
+func deviceSecretPath() string { return filepath.Join(filepath.Dir(configPath()), "device.secret") }
 
 // ---------- Provisioning ----------
 
@@ -38,10 +42,28 @@ func provisionGateway() {
 		return
 	}
 	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		logger.Info("provisioning: gateway registered successfully")
+			// Cache returned deviceSecret/mqtt credentials for later authenticated fetches (integrations, config)
+		var out struct {
+			DeviceSecret string `json:"deviceSecret"`
+			MQTTUsername string `json:"mqttUsername"`
+			MQTTPassword string `json:"mqttPassword"`
+			Gateway      struct {
+				DeviceID string `json:"deviceId"`
+				TenantID string `json:"tenantId"`
+			} `json:"gateway"`
+		}
+		if err := json.Unmarshal(raw, &out); err == nil && out.DeviceSecret != "" {
+			setCachedDeviceSecret(out.DeviceSecret)
+			// Persist 0600 for restarts (never log secret)
+			secretPath := deviceSecretPath()
+			_ = os.MkdirAll(filepath.Dir(secretPath), 0755)
+			_ = os.WriteFile(secretPath, []byte(out.DeviceSecret), 0600)
+			logger.Info("provisioning: device secret cached for integration fetches")
+		}
 	} else {
-		body, _ := io.ReadAll(resp.Body)
-		logger.WithFields(logrus.Fields{"status": resp.StatusCode, "response": string(body)}).Warn("provisioning: unexpected response")
+		logger.WithFields(logrus.Fields{"status": resp.StatusCode, "response": string(raw)}).Warn("provisioning: unexpected response")
 	}
 }

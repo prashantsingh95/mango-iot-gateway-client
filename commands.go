@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -33,6 +34,59 @@ type CommandResponse struct {
 	Timestamp string      `json:"timestamp"`
 }
 
+// PHASE 1 — command idempotency (MASTER §9/§13). MQTT may redeliver; replaying
+// reboot/firmware twice is unsafe. Keep a bounded in-memory set of recently
+// seen command IDs (24h TTL, 1000 entries max) and ACK duplicates without
+// re-executing.
+var (
+	seenCommands   = make(map[string]time.Time)
+	seenCommandsMu = sync.Mutex{}
+)
+
+func isDuplicateCommand(id string) bool {
+	seenCommandsMu.Lock()
+	defer seenCommandsMu.Unlock()
+	now := time.Now()
+	// opportunistic expiry
+	for k, t := range seenCommands {
+		if now.Sub(t) > 24*time.Hour {
+			delete(seenCommands, k)
+		}
+	}
+	if _, ok := seenCommands[id]; ok {
+		return true
+	}
+	seenCommands[id] = now
+	// bound memory
+	if len(seenCommands) > 1000 {
+		oldest := ""
+		var oldestT time.Time
+		first := true
+		for k, t := range seenCommands {
+			if first || t.Before(oldestT) {
+				oldest, oldestT, first = k, t, false
+			}
+		}
+		delete(seenCommands, oldest)
+	}
+	return false
+}
+
+func isCommandAllowed(cmdType string) bool {
+	if !cfg.Commands.Enabled {
+		return false
+	}
+	if len(cfg.Commands.Allowed) == 0 {
+		return true // backwards compat: empty allowlist = all enabled types
+	}
+	for _, a := range cfg.Commands.Allowed {
+		if a == cmdType {
+			return true
+		}
+	}
+	return false
+}
+
 // ---------- Command Handler ----------
 
 func handleCommand(client MQTT.Client, msg MQTT.Message) {
@@ -55,6 +109,28 @@ func handleCommand(client MQTT.Client, msg MQTT.Message) {
 	}
 	if cmd.Type == "" {
 		logger.Warn("command missing type, rejecting")
+		return
+	}
+
+	// PHASE 1 — dedup before execute (MASTER §13). Duplicate delivery => ACK
+	// without re-executing.
+	if isDuplicateCommand(cmd.ID) {
+		logger.WithFields(logrus.Fields{"id": cmd.ID, "type": cmd.Type}).Info("duplicate command ignored (idempotent replay)")
+		sendCommandResponse(CommandResponse{
+			ID: cmd.ID, Status: "completed", Success: true,
+			Result:    "duplicate ignored",
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+		})
+		return
+	}
+
+	// PHASE 1 — enforce commands.allowed (was configured but never checked).
+	if !isCommandAllowed(cmd.Type) {
+		logger.WithFields(logrus.Fields{"id": cmd.ID, "type": cmd.Type}).Warn("command type not allowed")
+		sendCommandResponse(CommandResponse{
+			ID: cmd.ID, Status: "rejected", Error: fmt.Sprintf("command type '%s' not allowed", cmd.Type),
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+		})
 		return
 	}
 
@@ -111,12 +187,23 @@ func execUpdateConfig(cmd CommandRequest) CommandResponse {
 		return CommandResponse{ID: cmd.ID, Status: "failed", Error: fmt.Sprintf("invalid config: %s", err), Timestamp: time.Now().UTC().Format(time.RFC3339)}
 	}
 
+	// Phase 5 / §22 — identity and tenant binding are platform-owned. A remote
+	// config push that tries to move this gateway is rejected outright.
+	if newCfg.Gateway.DeviceID != "" && newCfg.Gateway.DeviceID != cfg.Gateway.DeviceID && cfg.Gateway.DeviceID != "" {
+		return CommandResponse{ID: cmd.ID, Status: "rejected", Error: "device_id is immutable via remote config", Timestamp: time.Now().UTC().Format(time.RFC3339)}
+	}
+	if newCfg.Gateway.TenantID != "" && newCfg.Gateway.TenantID != cfg.Gateway.TenantID {
+		return CommandResponse{ID: cmd.ID, Status: "rejected", Error: "tenant_id is immutable via remote config", Timestamp: time.Now().UTC().Format(time.RFC3339)}
+	}
+	newCfg.Gateway.DeviceID = cfg.Gateway.DeviceID
+	newCfg.Gateway.TenantID = cfg.Gateway.TenantID
+
 	if err := secrets.processConfig(&newCfg); err != nil {
 		return CommandResponse{ID: cmd.ID, Status: "failed", Error: fmt.Sprintf("secrets: %s", err), Timestamp: time.Now().UTC().Format(time.RFC3339)}
 	}
 
 	data, _ := yaml.Marshal(&newCfg)
-	if err := os.WriteFile(configPath(), data, 0644); err != nil {
+	if err := os.WriteFile(configPath(), data, 0600); err != nil {
 		return CommandResponse{ID: cmd.ID, Status: "failed", Error: err.Error(), Timestamp: time.Now().UTC().Format(time.RFC3339)}
 	}
 	return CommandResponse{ID: cmd.ID, Status: "completed", Result: "config updated, restart agent to apply", Timestamp: time.Now().UTC().Format(time.RFC3339)}
@@ -185,6 +272,7 @@ func execFirmwareUpdate(cmd CommandRequest) CommandResponse {
 		URL         string `json:"url"`
 		DownloadURL string `json:"downloadUrl"`
 		Checksum    string `json:"checksum"`
+		Signature   string `json:"signature"` // hex ed25519 signature over raw binary (required when ota.signing_key set)
 		Version     string `json:"version"`
 		FirmwareID  string `json:"firmwareId"`
 		Filename    string `json:"filename"`
@@ -212,6 +300,11 @@ func execFirmwareUpdate(cmd CommandRequest) CommandResponse {
 	if payload.Checksum == "" {
 		return CommandResponse{ID: cmd.ID, Status: "failed", Error: "checksum required", Timestamp: time.Now().UTC().Format(time.RFC3339)}
 	}
+	// Phase 5 / §19 — signature is mandatory when a signing key is configured.
+	// A checksum alone is attacker-controlled (same channel as the binary).
+	if cfg.OTA.SigningKey != "" && payload.Signature == "" {
+		return CommandResponse{ID: cmd.ID, Status: "rejected", Error: "signature required (ota.signing_key configured)", Timestamp: time.Now().UTC().Format(time.RFC3339)}
+	}
 
 	logger.WithFields(logrus.Fields{"version": version, "url": url}).Info("starting firmware update")
 	os.MkdirAll(cfg.OTA.FirmwareDir, 0755)
@@ -224,9 +317,17 @@ func execFirmwareUpdate(cmd CommandRequest) CommandResponse {
 
 	data, _ := os.ReadFile(binPath)
 	hash := fmt.Sprintf("%x", sha256.Sum256(data))
-	if hash != payload.Checksum {
+	if !strings.EqualFold(hash, payload.Checksum) {
 		os.Remove(binPath)
 		return CommandResponse{ID: cmd.ID, Status: "failed", Error: "checksum mismatch", Timestamp: time.Now().UTC().Format(time.RFC3339)}
+	}
+	if cfg.OTA.SigningKey != "" {
+		if err := verifyArtifactSignature(data, payload.Signature, cfg.OTA.SigningKey); err != nil {
+			os.Remove(binPath)
+			return CommandResponse{ID: cmd.ID, Status: "failed", Error: fmt.Sprintf("signature: %s", err), Timestamp: time.Now().UTC().Format(time.RFC3339)}
+		}
+	} else {
+		logger.Warn("ota: no signing key configured — checksum-only verification (set ota.signing_key)")
 	}
 
 	if err := os.Chmod(binPath, 0755); err != nil {
@@ -244,12 +345,16 @@ func execFirmwareUpdate(cmd CommandRequest) CommandResponse {
 		return CommandResponse{ID: cmd.ID, Status: "failed", Error: err.Error(), Timestamp: time.Now().UTC().Format(time.RFC3339)}
 	}
 
+	// Phase 5 / §19 — arm the boot health gate: the new binary must check in
+	// with the cloud inside the rollback window or the backup is restored.
+	armOtaPendingMarker(version)
+
 	go func() {
 		time.Sleep(1 * time.Second)
 		syscall.Kill(os.Getpid(), syscall.SIGTERM)
 	}()
 
-	return CommandResponse{ID: cmd.ID, Status: "completed", Result: fmt.Sprintf("updated to version %s, restarting", payload.Version), Timestamp: time.Now().UTC().Format(time.RFC3339)}
+	return CommandResponse{ID: cmd.ID, Status: "completed", Result: fmt.Sprintf("updated to version %s, restarting (health-gated)", payload.Version), Timestamp: time.Now().UTC().Format(time.RFC3339)}
 }
 
 func execSetRelay(cmd CommandRequest) CommandResponse {

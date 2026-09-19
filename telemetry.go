@@ -47,6 +47,10 @@ type StatusData struct {
 	MACAddress   string `json:"mac_address,omitempty"`
 	HardwareVer  string `json:"hardware_version,omitempty"`
 	OSVersion    string `json:"os_version,omitempty"`
+	// Phase 5 / §22 — reported configuration: the platform diffs this
+	// against desired state to detect drift (revision = unix apply time).
+	ConfigRevision int64  `json:"config_revision"`
+	ConfigHash     string `json:"config_hash"`
 }
 
 // ---------- System Monitoring ----------
@@ -191,6 +195,10 @@ func runTelemetryLoop(ctx context.Context) {
 			}
 
 			sys := collectSystemMetrics()
+			// Storage monitoring §37: gateway data includes SD card health
+			if offlineStorage != nil {
+				sys["storage"] = offlineStorage.GetStorageInfo()
+			}
 			telemetry.System = sys
 
 			if v, ok := sys["cpu_percent"].(float64); ok {
@@ -234,6 +242,24 @@ func runTelemetryLoop(ctx context.Context) {
 			}
 
 			publishTelemetry(telemetry)
+			// Customer data plane: route same modbus/system payload to external MQTT integrations via declarative pipeline
+			customerRaw := map[string]interface{}{
+				"deviceId":  telemetry.DeviceID,
+				"gatewayId": getDeviceID(),
+				"timestamp": telemetry.Timestamp,
+				"system":    sys,
+				"modbus":    telemetry.Modbus,
+				"tenantId":  cfg.Gateway.TenantID,
+			}
+			// Flatten modbus values for fieldMappings like "modbus.power-meter.voltage"
+			if len(telemetry.Modbus) > 0 {
+				flat := make(map[string]interface{}, len(telemetry.Modbus))
+				for _, v := range telemetry.Modbus {
+					flat[v.Name] = v.Value
+				}
+				customerRaw["registers"] = flat
+			}
+			publishToCustomer(customerRaw, "telemetry")
 			state.mu.Lock()
 			state.LastTelemetry = time.Now()
 			state.mu.Unlock()
@@ -261,6 +287,8 @@ func sendStatus(status string, reason ...string) {
 		MACAddress:   getMACAddress(),
 		HardwareVer:  getHardwareVersion(),
 		OSVersion:    getOSVersion(),
+		ConfigRevision: configRevision,
+		ConfigHash:     configHash,
 	}
 	publishStatus(s)
 }

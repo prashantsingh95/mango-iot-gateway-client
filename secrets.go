@@ -138,7 +138,7 @@ func (sm *secretsManager) processConfig(cfg *Config) error {
 		if err != nil {
 			return fmt.Errorf("marshal config: %w", err)
 		}
-		if err := os.WriteFile(configPath(), data, 0644); err != nil {
+		if err := os.WriteFile(configPath(), data, 0600); err != nil {
 			return fmt.Errorf("rewrite config: %w", err)
 		}
 		logger.Info("secrets: encrypted plaintext secrets in config file")

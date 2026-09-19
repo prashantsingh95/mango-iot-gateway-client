@@ -51,6 +51,9 @@ type modbusHandler struct {
 	device   ModbusDevice
 	handler  modbus.ClientHandler
 	client   modbus.Client
+	// Phase 5 — the goburrow client is not goroutine-safe: the poll loop and
+	// on-demand read_register commands share one handler. Serialize all I/O.
+	mu sync.Mutex
 }
 
 func newModbusHandler(dev ModbusDevice) (*modbusHandler, error) {
@@ -99,6 +102,8 @@ func (mh *modbusHandler) readRegisters() []ModbusValue {
 }
 
 func (mh *modbusHandler) readRegister(reg ModbusRegister) (ModbusValue, error) {
+	mh.mu.Lock()
+	defer mh.mu.Unlock()
 	mv := ModbusValue{Name: reg.Name, Time: time.Now()}
 
 	var raw []byte

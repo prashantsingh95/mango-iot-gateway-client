@@ -8,7 +8,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -22,29 +21,37 @@ import (
 // ---------- Globals ----------
 
 var (
-	cfg         Config
-	state       AgentState
-	mqttClient  MQTT.Client
-	mqttMu      sync.Mutex
-	modbusPools = make(map[string]*modbusHandler)
-	modbusMu    sync.RWMutex
-	logger      = logrus.New()
-	logFile     *os.File
-	startTime   = time.Now()
-	version     = "1.0.0"
-	secrets     *secretsManager
-	modbusCol   *modbusCollector
-	healthSrv   *healthServer
-	telemetryBuf *telemetryBuffer
+	cfg            Config
+	state          AgentState
+	mqttClient     MQTT.Client
+	mqttMu         sync.Mutex
+	modbusPools    = make(map[string]*modbusHandler)
+	modbusMu      sync.RWMutex
+	logger         = logrus.New()
+	logFile        *os.File
+	startTime      = time.Now()
+	version        = "1.0.0"
+	secrets        *secretsManager
+	modbusCol      *modbusCollector
+	healthSrv      *healthServer
+	spool          *spoolQueue
+	offlineStorage *OfflineStorage
 )
 
 // ---------- Main ----------
 
 func main() {
-	logger.SetFormatter(&logrus.TextFormatter{
-		FullTimestamp: true,
-		ForceColors:   runtime.GOOS != "linux",
-	})
+	// PHASE 1 — structured logging (MASTER §38). JSON when LOG_FORMAT=json
+	// (production/Docker/Loki), human text otherwise. device_id is attached
+	// to every entry via a base field below after config load.
+	if os.Getenv("LOG_FORMAT") == "json" {
+		logger.SetFormatter(&logrus.JSONFormatter{TimestampFormat: time.RFC3339})
+	} else {
+		logger.SetFormatter(&logrus.TextFormatter{
+			FullTimestamp: true,
+			ForceColors:   runtime.GOOS != "linux",
+		})
+	}
 
 	// Parse flags
 	configFile := configPath()
@@ -118,6 +125,40 @@ func main() {
 	if cfg.Terminal.FileDir == "" {
 		cfg.Terminal.FileDir = "/tmp"
 	}
+	if cfg.Terminal.MaxFileBytes <= 0 {
+		cfg.Terminal.MaxFileBytes = 25 * 1024 * 1024
+	}
+	if cfg.Terminal.IdleTimeoutMinutes <= 0 {
+		cfg.Terminal.IdleTimeoutMinutes = 30
+	}
+	if cfg.Terminal.MaxSessionHours <= 0 {
+		cfg.Terminal.MaxSessionHours = 8
+	}
+	if cfg.Terminal.MaxSessions <= 0 {
+		cfg.Terminal.MaxSessions = 5
+	}
+	if len(cfg.Terminal.ShellAllowlist) == 0 {
+		cfg.Terminal.ShellAllowlist = []string{cfg.Terminal.Shell}
+	}
+
+	// Offline spool defaults (Phase 5 / §20)
+	if cfg.Queue.MaxEvents <= 0 {
+		cfg.Queue.MaxEvents = 20000
+	}
+	if cfg.Queue.TTLHours <= 0 {
+		cfg.Queue.TTLHours = 72
+	}
+	if cfg.Queue.MaxMB <= 0 {
+		cfg.Queue.MaxMB = 256
+	}
+	if cfg.Queue.FlushBatch <= 0 {
+		cfg.Queue.FlushBatch = 100
+	}
+	if cfg.Queue.Path == "" {
+		cfg.Queue.Path = filepath.Join(filepath.Dir(configFile), "spool.db")
+	}
+
+	stampConfigRevision()
 
 	// Setup logging
 	switch cfg.Logging.Level {
@@ -132,7 +173,7 @@ func main() {
 	}
 
 	if cfg.Logging.File != "" {
-		f, err := os.OpenFile(cfg.Logging.File, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		f, err := os.OpenFile(cfg.Logging.File, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 		if err == nil {
 			logFile = f
 			logger.SetOutput(io.MultiWriter(os.Stderr, f))
@@ -145,14 +186,8 @@ func main() {
 		logger.WithError(err).Warn("secrets: processing failed, continuing with plaintext")
 	}
 
-	// Initialize device ID
-	deviceID := cfg.Gateway.DeviceID
-	if deviceID == "" {
-		deviceID = strings.ReplaceAll(getMACAddress(), ":", "")
-		if deviceID == "" {
-			deviceID = fmt.Sprintf("pi-%d", time.Now().Unix())
-		}
-	}
+	// Initialize device ID — pinned stable identity (Phase 5 / §21).
+	deviceID := resolveStableDeviceID(cfg.Gateway.DeviceID)
 
 	serial := cfg.Gateway.SerialNumber
 	if serial == "" {
@@ -174,6 +209,42 @@ func main() {
 		"kernel":     info.KernelVersion,
 		"version":    version,
 	}).Info("Mango IoT Gateway Agent starting")
+
+	// Open the offline spool BEFORE provisioning/connect so early events
+	// (including provision-time status) survive an outage (Phase 5 / §20).
+	// Always on by default; set queue.max_events: 0 to disable.
+	if cfg.Queue.MaxEvents > 0 {
+		if q, err := openSpool(cfg.Queue.Path, cfg.Queue.MaxEvents, cfg.Queue.TTLHours, int64(cfg.Queue.MaxMB)*1024*1024); err != nil {
+			logger.WithError(err).Warn("spool unavailable: outage events will be dropped")
+		} else {
+			spool = q
+			defer spool.close()
+			logger.WithFields(spoolLogFields(spool)).Info("offline spool open")
+		}
+	}
+
+	// New offline storage: two logical queues with chunked storage, quotas, priorities (§14-19)
+	// Base path: /data/offline (shared SD card, 64GB) with gateway/ and external-devices/ subdirs
+	offlineBase := "/data/offline"
+	if _, err := os.Stat("/data"); os.IsNotExist(err) {
+		offlineBase = filepath.Join(filepath.Dir(configFile), "offline")
+	}
+	// Quota: 2GB offline data (configurable), 256MB per chunk, 2GB safety reserve
+	if osStorage, err := NewOfflineStorage(offlineBase, 2*1024*1024*1024, 256*1024*1024); err != nil {
+		logger.WithError(err).Warn("offline storage (dual queues) unavailable")
+	} else {
+		offlineStorage = osStorage
+		defer offlineStorage.Close()
+		logger.WithFields(logrus.Fields{
+			"basePath": offlineBase,
+			"gatewayQueue": offlineStorage.gatewayQueue.Count(),
+			"externalQueue": offlineStorage.externalQueue.Count(),
+		}).Info("offline storage initialized (gateway + external-device queues, chunked)")
+	}
+
+	// OTA boot gate: if the previous boot installed new firmware, require a
+	// successful cloud check-in within the rollback window or restore backup.
+	otaBootGate()
 
 	// Provision with platform (if token and URL configured)
 	provisionGateway()
@@ -210,11 +281,19 @@ func main() {
 	go runTelemetryLoop(ctx)
 	go runModbusLoop(ctx)
 	go startWatchdog(ctx)
+	go runSpoolFlushLoop(ctx)
+	go startIntegrationPoller(ctx)
 
 	// Reverse-connection terminal agent (optional)
 	if cfg.Terminal.Enabled && cfg.Terminal.BackendWSURL != "" && cfg.Terminal.AgentSecret != "" {
 		go startTerminalAgent(ctx)
 		logger.Info("terminal agent: enabled (reverse-connection)")
+	}
+
+	// Cloudflare Zero Trust Tunnel for SSH (outbound, no inbound 22)
+	if cfg.Cloudflare.Enabled && cfg.Cloudflare.AgentSecret != "" {
+		go startCloudflareTunnel(ctx)
+		logger.Info("cloudflare tunnel: enabled (outbound SSH)")
 	}
 
 	// Start HTTP health endpoint on localhost:8090
