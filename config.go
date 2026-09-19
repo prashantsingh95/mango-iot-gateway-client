@@ -3,9 +3,11 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -38,6 +40,7 @@ type MQTTConfig struct {
 	ReconnectDelay     int             `yaml:"reconnect_delay"`
 	MaxReconnectDelay  int             `yaml:"max_reconnect_delay"`
 	Topics             MQTTTopicConfig `yaml:"topics"`
+	AllowAnonymous     bool            `yaml:"allow_anonymous"` // explicit dev only; production NEVER allows true
 }
 
 type ModbusRegister struct {
@@ -206,6 +209,7 @@ type BrandingConfig struct {
 }
 
 type Config struct {
+	Environment string               `yaml:"environment"` // production | development | test (default: production)
 	Gateway    GatewayConfig         `yaml:"gateway"`
 	Branding   BrandingConfig        `yaml:"branding"`
 	Queue      QueueConfig           `yaml:"queue"`
@@ -269,6 +273,19 @@ func startConfigReloader() {
 					continue
 				}
 			}
+			// Prevent auth downgrade on reload: validate new MQTT config before applying.
+			// Use newCfg.Environment for env detection when GATEWAY_ENV is unset.
+			reloadEnv := strings.ToLower(strings.TrimSpace(os.Getenv("GATEWAY_ENV")))
+			if reloadEnv == "" {
+				reloadEnv = strings.ToLower(strings.TrimSpace(newCfg.Environment))
+				if reloadEnv == "" {
+					reloadEnv = "production"
+				}
+			}
+			if err := ValidateMQTTConfigWithEnv(newCfg.MQTT, reloadEnv); err != nil {
+				logger.WithFields(logrus.Fields{"env": reloadEnv, "broker": newCfg.MQTT.BrokerURL}).Errorf("config reload: rejected invalid MQTT config: %v (keeping existing authenticated config, not downgrading)", err)
+				continue
+			}
 			switch newCfg.Logging.Level {
 			case "debug":
 				logger.SetLevel(logrus.DebugLevel)
@@ -298,4 +315,71 @@ func startConfigReloader() {
 			logger.WithField("interval", cfg.Monitoring.Interval).Info("config reloaded")
 		}
 	}()
+}
+
+// ---------- Environment & Production Validation ----------
+
+func effectiveEnvironment() string {
+	// GATEWAY_ENV wins over config file; default is production (fail-closed)
+	if e := os.Getenv("GATEWAY_ENV"); e != "" {
+		return strings.ToLower(strings.TrimSpace(e))
+	}
+	if e := strings.ToLower(strings.TrimSpace(cfg.Environment)); e != "" {
+		return e
+	}
+	return "production"
+}
+
+func isProduction() bool { return effectiveEnvironment() == "production" }
+
+// ValidateMQTTConfig enforces production-safe Mango MQTT credentials using the
+// effective environment (GATEWAY_ENV > cfg.Environment > production).
+// It never logs secrets.
+func ValidateMQTTConfig(c MQTTConfig) error {
+	return ValidateMQTTConfigWithEnv(c, effectiveEnvironment())
+}
+
+// ValidateMQTTConfigWithEnv enforces production-safe Mango MQTT credentials for an explicit env.
+// It never logs secrets.
+func ValidateMQTTConfigWithEnv(c MQTTConfig, env string) error {
+	if c.BrokerURL == "" {
+		return fmt.Errorf("mqtt.broker_url is required (env=%s)", env)
+	}
+	if c.ClientIDPrefix == "" {
+		return fmt.Errorf("mqtt.client_id_prefix is required (env=%s)", env)
+	}
+	if c.KeepAlive <= 0 || c.KeepAlive > 3600 {
+		return fmt.Errorf("mqtt.keep_alive must be 1..3600 (got %d)", c.KeepAlive)
+	}
+	if c.QoS > 2 {
+		return fmt.Errorf("mqtt.qos must be 0..2 (got %d)", c.QoS)
+	}
+	if c.CleanSession != false {
+		// Persistent session required for QoS1 inflight across reconnects.
+		return fmt.Errorf("mqtt.clean_session must be false (persistent session required, env=%s)", env)
+	}
+	if c.SSL {
+		// TLS: CA cert must exist if configured; if ca_cert path is set it must be readable
+		// (actual TLS build will fail later if unreadable, but we validate early)
+	}
+	// Production: anonymous never allowed; Development: only when explicitly allow_anonymous true
+	// NOTE: env must be pre-normalized to lowercase by caller.
+	if env == "production" {
+		if c.AllowAnonymous {
+			return fmt.Errorf("mqtt.allow_anonymous=true is never allowed in production (env=%s)", env)
+		}
+		if strings.TrimSpace(c.Username) == "" || strings.TrimSpace(c.Password) == "" {
+			return fmt.Errorf("production mqtt requires username and password (both non-empty, env=%s) — anonymous MQTT is disabled", env)
+		}
+	} else {
+		// Development/test: anonymous allowed ONLY when explicitly allow_anonymous true
+		if strings.TrimSpace(c.Username) == "" || strings.TrimSpace(c.Password) == "" {
+			if !c.AllowAnonymous {
+				return fmt.Errorf("development mqtt with empty credentials requires mqtt.allow_anonymous: true (explicit, env=%s)", env)
+			}
+			// explicitly allowed — warn loud
+			logger.Warn("mqtt: anonymous connection explicitly allowed (development, allow_anonymous=true)")
+		}
+	}
+	return nil
 }

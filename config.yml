@@ -1,6 +1,9 @@
 # Mango IoT Gateway Agent Configuration
 # All fields documented with defaults.
 # Path: /opt/gateway/config.yml or set GATEWAY_CONFIG env var.
+# Environment: production (default, fail-closed) | development | test
+#   GATEWAY_ENV env var wins over this file. Never allow anonymous MQTT in production.
+environment: production
 
 gateway:
   device_id: ""                    # Auto from MAC if empty
@@ -33,8 +36,9 @@ queue:
 
 mqtt:
   broker_url: "mqtt://localhost:1883"
-  username: ""                     # Leave empty for anonymous
-  password: ""
+  username: ""                     # Per-gateway MQTT username (required in production, provisioned via provisioning.go)
+  password: ""                     # Per-gateway MQTT password (required in production, encrypted at rest 0600 via secrets.go)
+  allow_anonymous: false           # ONLY true for explicit development Mosquitto (allow_anonymous true). Production NEVER allows true.
   client_id_prefix: "gw"
   ssl: false
   ca_cert: ""                      # Path to CA cert for TLS
@@ -42,7 +46,7 @@ mqtt:
   client_key: ""                   # Path to client key for TLS
   qos: 1
   keep_alive: 60
-  clean_session: false
+  clean_session: false             # MUST be false for persistent QoS1 session (enforced by ValidateMQTTConfig)
   reconnect_delay: 5
   max_reconnect_delay: 60
   topics:

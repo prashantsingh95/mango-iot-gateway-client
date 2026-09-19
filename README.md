@@ -21,6 +21,16 @@ Designed for production deployments — static binary, minimal dependencies, sys
 - Auto-reconnect with exponential backoff
 - Configurable QoS (0/1/2), keep-alive, clean session
 - Multiple broker URL fallback support
+- **Production MQTT authentication (fail-closed):** production gateways REQUIRE
+  per-gateway `mqtt.username` + `mqtt.password` (provisioned via `provisioning.go`,
+  encrypted at rest `0600` via `secrets.go`). Empty production credentials are
+  rejected by `ValidateMQTTConfig` — the gateway never connects anonymously in
+  production, stays alive queuing offline, and retries provisioning. Anonymous
+  MQTT is allowed ONLY in `development` with explicit `mqtt.allow_anonymous: true`
+  (local Mosquitto). Production broker must enforce `allow_anonymous false`;
+  `clean_session` must be `false` (persistent QoS1). Set `environment: production`
+  (default) or `GATEWAY_ENV=production`. Each IOT-2024G gateway receives its own
+  credentials — never hardcode or share them.
 
 ### Remote Commands
 | Command | Description |

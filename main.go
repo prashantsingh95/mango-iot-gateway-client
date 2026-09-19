@@ -249,10 +249,37 @@ func main() {
 	// Provision with platform (if token and URL configured)
 	provisionGateway()
 
-	// Connect MQTT
-	if err := mqttConnect(); err != nil {
-		logger.WithError(err).Fatal("MQTT connection failed")
+	// Validate MQTT config fail-closed before connect (never anonymous in production)
+	if err := ValidateMQTTConfig(cfg.MQTT); err != nil {
+		logger.WithFields(logrus.Fields{"env": effectiveEnvironment(), "broker": cfg.MQTT.BrokerURL}).Errorf("mqtt: validation failed at startup: %v (gateway remains alive, queuing offline, retrying provisioning)", err)
+		setConnected(false)
+		// Do not Fatal — keep process alive for offline queue and provisioning retry (see §3)
+	} else {
+		// Connect MQTT
+		if err := mqttConnect(); err != nil {
+			// Safe log: never expose password (see §7) — token.Error() never contains secret
+			logger.WithFields(logrus.Fields{"env": effectiveEnvironment(), "broker": cfg.MQTT.BrokerURL}).WithError(err).Error("MQTT connect failed at startup (queuing offline, will retry)")
+			setConnected(false)
+			// Keep alive for offline queue; reconnect loop inside paho will retry, and provisioning retry below will refresh creds
+		}
 	}
+	// Retry provisioning in background if MQTT unavailable (not configured)
+	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			if !isConnected() && cfg.Gateway.ProvisionToken != "" && cfg.Gateway.PlatformURL != "" {
+				logger.Info("mqtt unavailable: retrying provisioning for credentials")
+				provisionGateway()
+				if err := ValidateMQTTConfig(cfg.MQTT); err == nil {
+					if err := mqttConnect(); err == nil {
+						logger.Info("mqtt: reconnected after provisioning retry")
+						return
+					}
+				}
+			}
+		}
+	}()
 
 	if cfg.Modbus.Enabled {
 		for _, dev := range cfg.Modbus.Devices {

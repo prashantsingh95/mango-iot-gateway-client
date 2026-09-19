@@ -17,6 +17,14 @@ import (
 // ---------- MQTT ----------
 
 func mqttConnect() error {
+	// Production-safe validation: fail-closed, never anonymous in production (§3, §5)
+	if err := ValidateMQTTConfig(cfg.MQTT); err != nil {
+		// Safe log: never expose password/secret (see §7)
+		logger.WithFields(logrus.Fields{"env": effectiveEnvironment(), "broker": cfg.MQTT.BrokerURL, "clientIdPrefix": cfg.MQTT.ClientIDPrefix}).Errorf("mqtt: production validation failed: %v (not connecting anonymously, retry provisioning)", err)
+		setConnected(false)
+		return fmt.Errorf("mqtt validation: %w", err)
+	}
+
 	deviceID := getDeviceID()
 
 	opts := MQTT.NewClientOptions()
