@@ -26,21 +26,21 @@ type MQTTTopicConfig struct {
 }
 
 type MQTTConfig struct {
-	BrokerURL          string          `yaml:"broker_url"`
-	Username           string          `yaml:"username"`
-	Password           string          `yaml:"password"`
-	ClientIDPrefix     string          `yaml:"client_id_prefix"`
-	SSL                bool            `yaml:"ssl"`
-	CACert             string          `yaml:"ca_cert"`
-	ClientCert         string          `yaml:"client_cert"`
-	ClientKey          string          `yaml:"client_key"`
-	QoS                byte            `yaml:"qos"`
-	KeepAlive          int             `yaml:"keep_alive"`
-	CleanSession       bool            `yaml:"clean_session"`
-	ReconnectDelay     int             `yaml:"reconnect_delay"`
-	MaxReconnectDelay  int             `yaml:"max_reconnect_delay"`
-	Topics             MQTTTopicConfig `yaml:"topics"`
-	AllowAnonymous     bool            `yaml:"allow_anonymous"` // explicit dev only; production NEVER allows true
+	BrokerURL         string          `yaml:"broker_url"`
+	Username          string          `yaml:"username"`
+	Password          string          `yaml:"password"`
+	ClientIDPrefix    string          `yaml:"client_id_prefix"`
+	SSL               bool            `yaml:"ssl"`
+	CACert            string          `yaml:"ca_cert"`
+	ClientCert        string          `yaml:"client_cert"`
+	ClientKey         string          `yaml:"client_key"`
+	QoS               byte            `yaml:"qos"`
+	KeepAlive         int             `yaml:"keep_alive"`
+	CleanSession      bool            `yaml:"clean_session"`
+	ReconnectDelay    int             `yaml:"reconnect_delay"`
+	MaxReconnectDelay int             `yaml:"max_reconnect_delay"`
+	Topics            MQTTTopicConfig `yaml:"topics"`
+	AllowAnonymous    bool            `yaml:"allow_anonymous"` // explicit dev only; production NEVER allows true
 }
 
 type ModbusRegister struct {
@@ -51,21 +51,21 @@ type ModbusRegister struct {
 }
 
 type ModbusDevice struct {
-	Name      string            `yaml:"name"`
-	Protocol  string            `yaml:"protocol"`
-	Address   string            `yaml:"address"`
-	SlaveID   byte              `yaml:"slave_id"`
-	BaudRate  int               `yaml:"baud_rate"`
-	DataBits  int               `yaml:"data_bits"`
-	StopBits  int               `yaml:"stop_bits"`
-	Parity    string            `yaml:"parity"`
-	Interval  int               `yaml:"interval"`
-	Registers []ModbusRegister  `yaml:"registers"`
+	Name      string           `yaml:"name"`
+	Protocol  string           `yaml:"protocol"`
+	Address   string           `yaml:"address"`
+	SlaveID   byte             `yaml:"slave_id"`
+	BaudRate  int              `yaml:"baud_rate"`
+	DataBits  int              `yaml:"data_bits"`
+	StopBits  int              `yaml:"stop_bits"`
+	Parity    string           `yaml:"parity"`
+	Interval  int              `yaml:"interval"`
+	Registers []ModbusRegister `yaml:"registers"`
 }
 
 type ModbusConfig struct {
-	Enabled bool            `yaml:"enabled"`
-	Devices []ModbusDevice  `yaml:"devices"`
+	Enabled bool           `yaml:"enabled"`
+	Devices []ModbusDevice `yaml:"devices"`
 }
 
 type GPIOSensor struct {
@@ -83,16 +83,16 @@ type GPIOConfig struct {
 }
 
 type MonitorConfig struct {
-	Interval          int    `yaml:"interval"`
-	CPU               bool   `yaml:"cpu"`
-	Memory            bool   `yaml:"memory"`
-	Disk              bool   `yaml:"disk"`
-	Temperature       bool   `yaml:"temperature"`
-	Network           bool   `yaml:"network"`
-	DiskThresholdWarn int    `yaml:"disk_threshold_warn"`
+	Interval            int  `yaml:"interval"`
+	CPU                 bool `yaml:"cpu"`
+	Memory              bool `yaml:"memory"`
+	Disk                bool `yaml:"disk"`
+	Temperature         bool `yaml:"temperature"`
+	Network             bool `yaml:"network"`
+	DiskThresholdWarn   int  `yaml:"disk_threshold_warn"`
 	MemoryThresholdWarn int  `yaml:"memory_threshold_warn"`
-	CPUThresholdWarn    int   `yaml:"cpu_threshold_warn"`
-	TempThresholdWarn   int   `yaml:"temp_threshold_warn"`
+	CPUThresholdWarn    int  `yaml:"cpu_threshold_warn"`
+	TempThresholdWarn   int  `yaml:"temp_threshold_warn"`
 }
 
 type LogConfig struct {
@@ -116,9 +116,9 @@ type OTAConfig struct {
 }
 
 type WatchdogConfig struct {
-	Enabled        bool `yaml:"enabled"`
-	Interval       int  `yaml:"interval"`
-	MaxMissedPings int  `yaml:"max_missed_pings"`
+	Enabled        bool   `yaml:"enabled"`
+	Interval       int    `yaml:"interval"`
+	MaxMissedPings int    `yaml:"max_missed_pings"`
 	Action         string `yaml:"action"`
 }
 
@@ -128,53 +128,63 @@ type ShellCommandConfig struct {
 }
 
 type CommandsConfig struct {
-	Enabled bool                `yaml:"enabled"`
-	Allowed []string            `yaml:"allowed"`
-	Shell   ShellCommandConfig  `yaml:"shell"`
+	Enabled bool               `yaml:"enabled"`
+	Allowed []string           `yaml:"allowed"`
+	Shell   ShellCommandConfig `yaml:"shell"`
+}
+
+// WifiAPConfig controls the host networking integration used by Wi-Fi AP
+// commands. The client detects NetworkManager or hostapd at runtime.
+type WifiAPConfig struct {
+	Enabled       bool   `yaml:"enabled"`
+	Interface     string `yaml:"interface"`
+	Connection    string `yaml:"connection"`
+	HostapdConfig string `yaml:"hostapd_config"`
+	MaxClients    int    `yaml:"max_clients"`
 }
 
 // TerminalConfig enables the reverse-connection remote terminal agent.
 // The agent dials OUT to the backend's Socket.IO /agent namespace (no inbound
 // ports). gateway_id defaults to the device id if unset.
 type TerminalConfig struct {
-	Enabled            bool   `yaml:"enabled"`
-	GatewayID          string `yaml:"gateway_id"`
-	BackendWSURL       string `yaml:"backend_ws_url"` // ws://host:3001 or wss://...
-	AgentSecret        string `yaml:"agent_secret"`   // issued by the platform
-	SigningPepper      string `yaml:"signing_pepper"` // MUST match backend TERMINAL_SIGNING_PEPPER
-	HeartbeatMs        int    `yaml:"heartbeat_ms"`
-	ReconnectBaseMs    int    `yaml:"reconnect_base_ms"`
-	ReconnectMaxMs     int    `yaml:"reconnect_max_ms"`
-	Shell              string `yaml:"shell"`
-	ShellAllowlist     []string `yaml:"shell_allowlist"` // exact shell binaries permitted (default: Shell only)
-	FileDir            string `yaml:"file_dir"` // base dir for uploads AND downloads (jail, defaults /tmp)
-	MaxFileBytes       int64  `yaml:"max_file_bytes"` // per-transfer cap (default 25MB)
-	IdleTimeoutMinutes int    `yaml:"idle_timeout_minutes"` // kill idle PTY sessions (default 30, 0 disables)
-	MaxSessionHours    int    `yaml:"max_session_hours"`    // absolute session lifetime (default 8, 0 disables)
-	MaxSessions        int    `yaml:"max_sessions"`         // concurrent PTY cap (default 5)
-	InsecureSkipVerify bool   `yaml:"insecure_skip_verify"`
+	Enabled            bool     `yaml:"enabled"`
+	GatewayID          string   `yaml:"gateway_id"`
+	BackendWSURL       string   `yaml:"backend_ws_url"` // ws://host:3001 or wss://...
+	AgentSecret        string   `yaml:"agent_secret"`   // issued by the platform
+	SigningPepper      string   `yaml:"signing_pepper"` // MUST match backend TERMINAL_SIGNING_PEPPER
+	HeartbeatMs        int      `yaml:"heartbeat_ms"`
+	ReconnectBaseMs    int      `yaml:"reconnect_base_ms"`
+	ReconnectMaxMs     int      `yaml:"reconnect_max_ms"`
+	Shell              string   `yaml:"shell"`
+	ShellAllowlist     []string `yaml:"shell_allowlist"`      // exact shell binaries permitted (default: Shell only)
+	FileDir            string   `yaml:"file_dir"`             // base dir for uploads AND downloads (jail, defaults /tmp)
+	MaxFileBytes       int64    `yaml:"max_file_bytes"`       // per-transfer cap (default 25MB)
+	IdleTimeoutMinutes int      `yaml:"idle_timeout_minutes"` // kill idle PTY sessions (default 30, 0 disables)
+	MaxSessionHours    int      `yaml:"max_session_hours"`    // absolute session lifetime (default 8, 0 disables)
+	MaxSessions        int      `yaml:"max_sessions"`         // concurrent PTY cap (default 5)
+	InsecureSkipVerify bool     `yaml:"insecure_skip_verify"`
 }
 
 // QueueConfig bounds the persistent offline spool (Phase 5 / §20).
 // The spool is a core reliability path: always on unless max_events is 0.
 type QueueConfig struct {
-	Path     string `yaml:"path"`      // SQLite file (default <config-dir>/spool.db)
-	MaxEvents int   `yaml:"max_events"` // row cap, oldest low-priority evicted first (0 disables spool)
-	TTLHours int    `yaml:"ttl_hours"`  // event age cap
-	MaxMB    int    `yaml:"max_mb"`     // payload byte cap
-	FlushBatch int  `yaml:"flush_batch"` // events per reconnect flush cycle
+	Path       string `yaml:"path"`        // SQLite file (default <config-dir>/spool.db)
+	MaxEvents  int    `yaml:"max_events"`  // row cap, oldest low-priority evicted first (0 disables spool)
+	TTLHours   int    `yaml:"ttl_hours"`   // event age cap
+	MaxMB      int    `yaml:"max_mb"`      // payload byte cap
+	FlushBatch int    `yaml:"flush_batch"` // events per reconnect flush cycle
 }
 
 // CloudflareTunnelConfig configures the Cloudflare Zero Trust Tunnel
 // for secure SSH access (Phase 4 / Cloudflare Zero Trust).
 type CloudflareTunnelConfig struct {
 	Enabled            bool   `yaml:"enabled"`
-	GatewayID          string `yaml:"gateway_id"`           // defaults to gateway.device_id
-	BackendWSURL       string `yaml:"backend_ws_url"`       // wss://host:3001 or wss://...
-	AgentSecret        string `yaml:"agent_secret"`         // issued by the platform (tunnel token, 0600 file)
-	TunnelID           string `yaml:"tunnel_id"`            // Cloudflare tunnel ID (for credentials-file)
-	AccountTag         string `yaml:"account_tag"`          // Cloudflare account tag (for credentials-file)
-	SigningPepper      string `yaml:"signing_pepper"`       // MUST match backend TERMINAL_SIGNING_PEPPER
+	GatewayID          string `yaml:"gateway_id"`     // defaults to gateway.device_id
+	BackendWSURL       string `yaml:"backend_ws_url"` // wss://host:3001 or wss://...
+	AgentSecret        string `yaml:"agent_secret"`   // issued by the platform (tunnel token, 0600 file)
+	TunnelID           string `yaml:"tunnel_id"`      // Cloudflare tunnel ID (for credentials-file)
+	AccountTag         string `yaml:"account_tag"`    // Cloudflare account tag (for credentials-file)
+	SigningPepper      string `yaml:"signing_pepper"` // MUST match backend TERMINAL_SIGNING_PEPPER
 	HeartbeatMs        int    `yaml:"heartbeat_ms"`
 	ReconnectBaseMs    int    `yaml:"reconnect_base_ms"`
 	ReconnectMaxMs     int    `yaml:"reconnect_max_ms"`
@@ -200,8 +210,8 @@ type GatewayConfig struct {
 // the same binary serves Mango, ACME, or any OEM tenant. Delivered via
 // provisioning/cloud config; the gateway must never change tenantId locally.
 type BrandingConfig struct {
-	ProductName  string `yaml:"product_name"`  // e.g. "ACME IoT Gateway" (default "Mango Gateway")
-	Manufacturer string `yaml:"manufacturer"`  // e.g. "ACME Inc."
+	ProductName  string `yaml:"product_name"` // e.g. "ACME IoT Gateway" (default "Mango Gateway")
+	Manufacturer string `yaml:"manufacturer"` // e.g. "ACME Inc."
 	SupportURL   string `yaml:"support_url"`
 	SupportEmail string `yaml:"support_email"`
 	DeviceLabel  string `yaml:"device_label"`
@@ -209,20 +219,21 @@ type BrandingConfig struct {
 }
 
 type Config struct {
-	Environment string               `yaml:"environment"` // production | development | test (default: production)
-	Gateway    GatewayConfig         `yaml:"gateway"`
-	Branding   BrandingConfig        `yaml:"branding"`
-	Queue      QueueConfig           `yaml:"queue"`
-	Cloudflare CloudflareTunnelConfig `yaml:"cloudflare_tunnel"`
-	MQTT       MQTTConfig            `yaml:"mqtt"`
-	Modbus     ModbusConfig          `yaml:"modbus"`
-	GPIO       GPIOConfig            `yaml:"gpio"`
-	Monitoring MonitorConfig         `yaml:"monitoring"`
-	Logging    LogConfig             `yaml:"logging"`
-	OTA        OTAConfig             `yaml:"ota"`
-	Watchdog   WatchdogConfig        `yaml:"watchdog"`
-	Commands   CommandsConfig        `yaml:"commands"`
-	Terminal   TerminalConfig        `yaml:"terminal"`
+	Environment string                 `yaml:"environment"` // production | development | test (default: production)
+	Gateway     GatewayConfig          `yaml:"gateway"`
+	Branding    BrandingConfig         `yaml:"branding"`
+	Queue       QueueConfig            `yaml:"queue"`
+	Cloudflare  CloudflareTunnelConfig `yaml:"cloudflare_tunnel"`
+	MQTT        MQTTConfig             `yaml:"mqtt"`
+	Modbus      ModbusConfig           `yaml:"modbus"`
+	GPIO        GPIOConfig             `yaml:"gpio"`
+	Monitoring  MonitorConfig          `yaml:"monitoring"`
+	Logging     LogConfig              `yaml:"logging"`
+	OTA         OTAConfig              `yaml:"ota"`
+	Watchdog    WatchdogConfig         `yaml:"watchdog"`
+	Commands    CommandsConfig         `yaml:"commands"`
+	WifiAP      WifiAPConfig           `yaml:"wifi_ap"`
+	Terminal    TerminalConfig         `yaml:"terminal"`
 }
 
 func configPath() string {

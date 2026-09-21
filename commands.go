@@ -155,6 +155,8 @@ func handleCommand(client MQTT.Client, msg MQTT.Message) {
 		resp = execSetRelay(cmd)
 	case "read_register":
 		resp = execReadRegister(cmd)
+	case "wifi_ap.status", "wifi_ap.enable", "wifi_ap.disable", "wifi_ap.configure", "wifi_ap.clients", "wifi_ap.ping_client":
+		resp = execWifiAP(cmd)
 	default:
 		resp.Status = "rejected"
 		resp.Error = fmt.Sprintf("unknown command type: %s", cmd.Type)

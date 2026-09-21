@@ -130,11 +130,27 @@ commands:
     - "update_firmware"
     - "set_relay"
     - "read_register"
+    - "wifi_ap.status"
+    - "wifi_ap.enable"
+    - "wifi_ap.disable"
+    - "wifi_ap.configure"
+    - "wifi_ap.clients"
+    - "wifi_ap.ping_client"
   shell:
     allowed_paths:
       - "/opt/gateway/scripts/"
       - "/usr/local/bin/"
     timeout: 30                    # Seconds before shell command timeout
+
+# Remote Wi-Fi AP management. The client detects NetworkManager (nmcli) first,
+# then hostapd. Configure the connection/interface explicitly on production
+# gateways so commands cannot target an unintended wireless device.
+wifi_ap:
+  enabled: true
+  interface: "wlan0"
+  connection: "mango-ap"
+  hostapd_config: ""
+  max_clients: 64
 
 # Cloudflare Zero Trust Tunnel (Phase 4). When enabled, the agent opens an OUTBOUND
 # TLS WebSocket to the backend /agent namespace (no inbound ports). Obtain
