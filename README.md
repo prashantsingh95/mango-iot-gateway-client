@@ -140,8 +140,31 @@ Designed for production deployments — static binary, minimal dependencies, sys
 │                │   Server     │      (/agent)    │
 │                │  (Platform)  │                  │
 │                └──────────────┘                  │
-└─────────────────────────────────────────────────┘
+ └─────────────────────────────────────────────────┘
 ```
+
+### Runtime (async, non-blocking)
+
+Collection never waits on the network:
+
+- **Async publisher** (`mqtt.go`): telemetry, status, logs and command
+  responses enqueue into a buffered FIFO channel (512) and return instantly.
+  One sender owns all broker I/O; failures and overflows spill to the durable
+  offline spool. Shutdown drains the queue before exit.
+- **Bounded command dispatch** (`commands.go`): each command runs in its own
+  goroutine (max 4 concurrent) so a 30s shell or firmware download never
+  stalls other commands. Dedup marks IDs synchronously, preserving idempotency.
+- **Lock-free customer pipeline** (`customer_mqtt.go`): integration configs
+  are snapshotted under lock; connects, transforms and publishes happen
+  outside it.
+- **Per-device Modbus pollers** (`modbus.go`): one goroutine + ticker per
+  device instead of a shared spin loop.
+- **Bounded subprocesses**: `vcgencmd` (3s), all `iw`/`nmcli`/`systemctl`/`ip`
+  calls (15s), firmware downloads (10min + status check), watchdog custom
+  actions (30s).
+- **Offline queues**: chunked dual-queue storage is primary; the legacy
+  SQLite spool opens only as fallback. A 60s flush loop drains both when
+  connected, plus a flush on every (re)connect.
 
 ---
 
@@ -217,6 +240,24 @@ sudo systemctl restart gateway-agent
 ```
 Once the agent shows connected in the platform gateway view, open the
 **Terminal** tab for a multi-tab, resizable shell with file upload/download.
+
+**Identity:** the agent authenticates with the platform **UUID** (`gateway.id`),
+not the deviceId. The UUID is captured automatically from the provisioning
+response and persisted to `<config-dir>/gateway.id` (0600); explicit
+`terminal.gateway_id` wins if set, deviceId is only a fallback. The backend
+accepts either form, but the UUID is canonical for relay keys and dashboard
+sessions — keep it stable, do not hand-edit the file.
+
+**Secrets:** `agent_secret` is one-time — issuing a new secret from the
+platform **invalidates the previous one immediately**. If the agent logs
+`Invalid gateway credentials` right after working, someone re-issued the
+secret: copy the new value into `terminal.agent_secret` and restart.
+
+**URLs:** `backend_ws_url` (and `platform_url`, MQTT `broker_url`) must be
+reachable **from the Pi**. `ws://localhost:3001` on the Pi means the Pi
+itself — use the server's LAN/host address, e.g. `ws://10.138.113.194:3001`.
+`signing_pepper` must equal the backend's `TERMINAL_SIGNING_PEPPER` exactly
+(no trailing spaces).
 
 > The platform also ships a standalone Node reference agent in
 > `gateway-agent/` if you prefer not to enable the terminal module here.
@@ -511,8 +552,9 @@ GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o gateway-agent-arm64 .
 | Provisioning fails | Verify token is active in cloud platform |
 | High CPU usage | Reduce `monitoring.interval` or disable unused modules |
 | Terminal shows "Agent offline" | `terminal.enabled: true`, `backend_ws_url` & `agent_secret` set, platform reachable over WS; check agent logs |
-| Terminal "Invalid gateway credentials" | `agent_secret` mismatch or not issued via platform `/agent-secret` |
-| Terminal "Message signature invalid" | `signing_pepper` on agent ≠ backend `TERMINAL_SIGNING_PEPPER` (must match) |
+| Terminal "Invalid gateway credentials" | `agent_secret` mismatch or not issued via platform `/agent-secret`. **Re-issuing invalidates the old secret** — update the agent right away. Verify the hash matches: `sha256(secret)` must equal the gateway's `agentSecretHash`. Backend accepts deviceId or UUID since v1 (canonical UUID preferred). |
+| Terminal "Message signature invalid" | `signing_pepper` on agent ≠ backend `TERMINAL_SIGNING_PEPPER` (must match, no trailing whitespace) |
+| Terminal UUID / gateway.id | Auto-written at provisioning next to the config; delete it only to force re-capture on next successful provision |
 
 ---
 
@@ -537,17 +579,28 @@ mango-iot-gateway-client/
 ├── main.go              # Entry point, globals, signal handling
 ├── config.go            # Configuration structs + loader
 ├── telemetry.go         # Telemetry/status data, system metrics collection
-├── mqtt.go              # MQTT client connect, publish, subscribe
+├── mqtt.go              # MQTT connect, async publisher, spool flush
 ├── commands.go          # Remote command handling (reboot, shell, firmware)
-├── provisioning.go      # Token-based auto-registration
-├── firmware.go          # OTA firmware download helper
-├── modbus.go            # Modbus TCP/RTU collector
+├── provisioning.go      # Token auto-registration, UUID + secret persistence
+├── firmware.go          # OTA firmware download helper (bounded)
+├── modbus.go            # Modbus TCP/RTU per-device pollers
 ├── gpio.go              # GPIO sensor/relay handling
 ├── secrets.go           # AES-GCM secrets encryption
 ├── health.go            # HTTP health check server
-├── state.go             # Agent state + telemetry buffer
+├── state.go             # Agent state
 ├── watchdog.go          # MQTT health ping watchdog
 ├── helpers.go           # Device ID, serial, MAC, IP utilities
+├── identity.go          # Stable device identity pinning
+├── protocol.go          # Terminal HMAC signing (must match backend)
+├── terminal.go          # Reverse-connection PTY agent (/agent namespace)
+├── cloudflare_tunnel.go # Cloudflare Zero-Trust tunnel (alternative shell)
+├── customer_mqtt.go     # External MQTT integration fan-out
+├── integration.go       # Field mapping / templates for integrations
+├── integration_poller.go# Polls platform for integration configs
+├── offline_storage.go   # Chunked dual-queue offline storage
+├── queue.go             # Legacy SQLite spool (fallback only)
+├── ota.go               # OTA apply, signature verify, rollback gate
+├── wifi_ap.go           # Remote Wi-Fi AP management (bounded subprocess)
 ├── go.mod / go.sum      # Go module dependencies
 ├── config.yml           # Configuration template
 ├── setup.sh             # One-command Pi installer

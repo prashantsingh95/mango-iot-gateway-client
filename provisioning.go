@@ -14,6 +14,32 @@ import (
 
 func deviceSecretPath() string { return filepath.Join(filepath.Dir(configPath()), "device.secret") }
 
+// gatewayIDPath persists the platform UUID assigned at provisioning. The
+// terminal agent authenticates with this UUID (see gatewayID()); the
+// human-readable deviceId is only a fallback for never-provisioned agents.
+func gatewayIDPath() string { return filepath.Join(filepath.Dir(configPath()), "gateway.id") }
+
+func loadPersistedGatewayID() string {
+	data, err := os.ReadFile(gatewayIDPath())
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func persistGatewayID(id string) {
+	if strings.TrimSpace(id) == "" {
+		return
+	}
+	secretPath := gatewayIDPath()
+	_ = os.MkdirAll(filepath.Dir(secretPath), 0755)
+	if err := os.WriteFile(secretPath, []byte(strings.TrimSpace(id)), 0600); err != nil {
+		logger.WithError(err).Warn("provisioning: failed to persist gateway UUID")
+		return
+	}
+	logger.Info("provisioning: gateway UUID persisted for terminal auth")
+}
+
 // ---------- Provisioning ----------
 
 func provisionGateway() {
@@ -53,11 +79,20 @@ func provisionGateway() {
 			MQTTPassword  string `json:"mqttPassword"`
 			MqttBrokerURL string `json:"mqttBrokerUrl"`
 			Gateway       struct {
+				ID       string `json:"id"`
 				DeviceID string `json:"deviceId"`
 				TenantID string `json:"tenantId"`
 			} `json:"gateway"`
 		}
 		if err := json.Unmarshal(raw, &out); err == nil {
+			if out.Gateway.ID != "" {
+				// First connect: capture the platform UUID now; the terminal
+				// agent uses it for all later sessions (see gatewayID()).
+				persistGatewayID(out.Gateway.ID)
+				if strings.TrimSpace(cfg.Terminal.GatewayID) == "" {
+					cfg.Terminal.GatewayID = strings.TrimSpace(out.Gateway.ID)
+				}
+			}
 			if out.DeviceSecret != "" {
 				setCachedDeviceSecret(out.DeviceSecret)
 				// Persist 0600 for restarts (never log secret)

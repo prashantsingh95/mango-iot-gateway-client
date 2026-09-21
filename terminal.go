@@ -672,11 +672,17 @@ func (a *terminalAgent) sendMessage(msgType string, payload map[string]interface
 }
 
 func (a *terminalAgent) gatewayID() string {
-	id := cfg.Terminal.GatewayID
-	if id == "" {
-		id = cfg.Gateway.DeviceID
+	// Prefer the platform UUID: explicit config first, then the UUID file
+	// written at provisioning time. The deviceId is only a fallback for
+	// agents that never provisioned (backend also accepts it, but the UUID
+	// is canonical for relay keys and dashboard sessions).
+	if id := strings.TrimSpace(cfg.Terminal.GatewayID); id != "" {
+		return id
 	}
-	return id
+	if id := loadPersistedGatewayID(); id != "" {
+		return id
+	}
+	return getDeviceID()
 }
 
 func (a *terminalAgent) writeFrame(frame string) {
