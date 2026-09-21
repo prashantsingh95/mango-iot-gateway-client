@@ -28,6 +28,22 @@ type wifiAPStatus struct {
 	Clients    []wifiAPClient `json:"clients,omitempty"`
 }
 
+// wifiAPCmdTimeout bounds every local subprocess call: a wedged nmcli/iw
+// (D-Bus stall) must never occupy a command worker forever.
+const wifiAPCmdTimeout = 15 * time.Second
+
+func wifiAPRun(name string, args ...string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), wifiAPCmdTimeout)
+	defer cancel()
+	return exec.CommandContext(ctx, name, args...).Run()
+}
+
+func wifiAPOutput(name string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), wifiAPCmdTimeout)
+	defer cancel()
+	return exec.CommandContext(ctx, name, args...).Output()
+}
+
 func wifiAPResponse(cmd CommandRequest, result interface{}, err error) CommandResponse {
 	resp := CommandResponse{ID: cmd.ID, Timestamp: time.Now().UTC().Format(time.RFC3339)}
 	if err != nil {
@@ -54,7 +70,7 @@ func wifiAPInterface() string {
 	if cfg.WifiAP.Interface != "" {
 		return cfg.WifiAP.Interface
 	}
-	out, err := exec.Command("iw", "dev").Output()
+	out, err := wifiAPOutput("iw", "dev")
 	if err != nil {
 		return ""
 	}
@@ -77,7 +93,7 @@ func wifiAPStatusCommand() CommandResponse {
 	if backend == "networkmanager" {
 		name := cfg.WifiAP.Connection
 		args := []string{"-t", "-f", "GENERAL.STATE,GENERAL.CONNECTION,802-11-wireless.ssid", "dev", "show"}
-		out, err := exec.Command("nmcli", args...).Output()
+		out, err := wifiAPOutput("nmcli", args...)
 		if err != nil {
 			return wifiAPResponse(cmd, nil, fmt.Errorf("nmcli status: %w", err))
 		}
@@ -100,7 +116,7 @@ func wifiAPStatusCommand() CommandResponse {
 }
 
 func systemdActive(service string) bool {
-	return exec.Command("systemctl", "is-active", "--quiet", service).Run() == nil
+	return wifiAPRun("systemctl", "is-active", "--quiet", service) == nil
 }
 
 func wifiAPClients() ([]wifiAPClient, error) {
@@ -111,7 +127,7 @@ func wifiAPClients() ([]wifiAPClient, error) {
 	if iface == "" {
 		return nil, fmt.Errorf("AP interface is not configured or detectable")
 	}
-	out, err := exec.Command("iw", "dev", iface, "station", "dump").Output()
+	out, err := wifiAPOutput("iw", "dev", iface, "station", "dump")
 	if err != nil {
 		return nil, fmt.Errorf("station list: %w", err)
 	}
@@ -142,7 +158,7 @@ func wifiAPClients() ([]wifiAPClient, error) {
 }
 
 func lookupClientIP(mac string) string {
-	out, err := exec.Command("ip", "neigh", "show", "lladdr", mac).Output()
+	out, err := wifiAPOutput("ip", "neigh", "show", "lladdr", mac)
 	if err != nil {
 		return ""
 	}
@@ -198,13 +214,13 @@ func execWifiAP(cmd CommandRequest) CommandResponse {
 			if cmd.Type == "wifi_ap.enable" {
 				action = "up"
 			}
-			err = exec.Command("nmcli", "connection", action, connection).Run()
+			err = wifiAPRun("nmcli", "connection", action, connection)
 		} else {
 			action := "stop"
 			if cmd.Type == "wifi_ap.enable" {
 				action = "start"
 			}
-			err = exec.Command("systemctl", action, "hostapd").Run()
+			err = wifiAPRun("systemctl", action, "hostapd")
 		}
 		if err != nil {
 			return wifiAPResponse(cmd, nil, fmt.Errorf("%s: %w", cmd.Type, err))
@@ -253,10 +269,10 @@ func wifiAPConfigure(cmd CommandRequest) CommandResponse {
 	if payload.Channel > 0 {
 		args = append(args, "802-11-wireless.channel", strconv.Itoa(payload.Channel))
 	}
-	if err := exec.Command("nmcli", args...).Run(); err != nil {
+	if err := wifiAPRun("nmcli", args...); err != nil {
 		return wifiAPResponse(cmd, nil, fmt.Errorf("configure AP: %w", err))
 	}
-	if err := exec.Command("nmcli", "connection", "up", connection).Run(); err != nil {
+	if err := wifiAPRun("nmcli", "connection", "up", connection); err != nil {
 		return wifiAPResponse(cmd, nil, fmt.Errorf("activate AP: %w", err))
 	}
 	return wifiAPStatusCommandWithID(cmd.ID)

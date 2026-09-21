@@ -45,11 +45,14 @@ func startWatchdog(ctx context.Context) {
 						if cfg.Watchdog.Action != "" {
 							tokens := strings.Fields(cfg.Watchdog.Action)
 							if len(tokens) > 0 {
+								// Bounded: a hung custom action must not wedge the watchdog.
+								ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 								if len(tokens) == 1 {
-									exec.Command(tokens[0]).Run()
+									exec.CommandContext(ctx, tokens[0]).Run()
 								} else {
-									exec.Command(tokens[0], tokens[1:]...).Run()
+									exec.CommandContext(ctx, tokens[0], tokens[1:]...).Run()
 								}
+								cancel()
 							}
 						}
 					}
