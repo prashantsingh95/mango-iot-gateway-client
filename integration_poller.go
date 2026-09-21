@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -75,20 +76,32 @@ func fetchAndApplyIntegrations() {
 }
 
 // cachedDeviceSecret holds the plaintext device secret returned at provisioning.
-// It is set in provisionGateway() and not persisted to disk in plaintext.
-var cachedSecret string
+// Guarded: written by provisionGateway (startup + background retry) and read
+// by the poller goroutine.
+var (
+	cachedSecret   string
+	cachedSecretMu sync.RWMutex
+)
 
 func cachedDeviceSecret() string {
+	cachedSecretMu.RLock()
 	if cachedSecret != "" {
-		return cachedSecret
+		s := cachedSecret
+		cachedSecretMu.RUnlock()
+		return s
 	}
+	cachedSecretMu.RUnlock()
 	if data, err := os.ReadFile(deviceSecretPath()); err == nil {
 		if s := strings.TrimSpace(string(data)); s != "" {
-			cachedSecret = s
+			setCachedDeviceSecret(s)
 			return s
 		}
 	}
 	return ""
 }
 
-func setCachedDeviceSecret(s string) { cachedSecret = s }
+func setCachedDeviceSecret(s string) {
+	cachedSecretMu.Lock()
+	cachedSecret = s
+	cachedSecretMu.Unlock()
+}

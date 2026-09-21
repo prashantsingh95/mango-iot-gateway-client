@@ -17,6 +17,7 @@
 #     --token prov-token-abc123 \
 #     --device-id factory-gw-01 \
 #     --name "Factory Gateway #1" \
+#     --platform-url https://iot.example.com \
 #     --output ./config.yml
 #
 # Arguments:
@@ -26,6 +27,7 @@
 #   --token TOKEN     Provisioning token
 #   --device-id ID    Unique device ID (default: auto from MAC)
 #   --name NAME       Human-readable name
+#   --platform-url URL Platform API URL (required for provisioning)
 #   --output PATH     Output path (default: ./config.yml)
 #   --help
 #=============================================================================
@@ -43,6 +45,7 @@ MQTT_PASS=""
 TOKEN=""
 DEVICE_ID=""
 GW_NAME=""
+PLATFORM_URL=""
 TENANT_ID="default"
 
 # ============================================================================
@@ -57,6 +60,7 @@ parse_args() {
       --token)      TOKEN="$2"; shift 2 ;;
       --device-id)  DEVICE_ID="$2"; shift 2 ;;
       --name)       GW_NAME="$2"; shift 2 ;;
+      --platform-url) PLATFORM_URL="$2"; shift 2 ;;
       --output)     OUTPUT="$2"; shift 2 ;;
       --help|-h)
         echo "Usage: bash configure.sh [options]"
@@ -111,6 +115,7 @@ prompt_missing() {
   [[ -z "${MQTT_PASS:-}" ]] && read -r -s -p "  MQTT password (optional): " MQTT_PASS && echo ""
   [[ -z "${TOKEN:-}" ]] && read -r -p "  Provisioning token (optional): " TOKEN
   [[ -z "${GW_NAME:-}" ]] && read -r -p "  Gateway name (optional): " GW_NAME
+  [[ -z "${PLATFORM_URL:-}" ]] && read -r -p "  Platform API URL (e.g. https://iot.example.com): " PLATFORM_URL
   GW_NAME="${GW_NAME:-Raspberry Pi Gateway}"
 }
 
@@ -130,7 +135,7 @@ gateway:
   serial_number: ""
   tenant_id: "${TENANT_ID}"
   provision_token: "${TOKEN:-}"
-  platform_url: ""
+  platform_url: "${PLATFORM_URL:-}"
 
 mqtt:
   broker_url: "${SERVER}"
@@ -143,7 +148,7 @@ mqtt:
   client_key: ""
   qos: 1
   keep_alive: 60
-  clean_session: true
+  clean_session: false
   reconnect_delay: 5
   max_reconnect_delay: 60
   topics:

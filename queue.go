@@ -66,8 +66,7 @@ func openSpool(path string, maxRows, ttlHours int, maxBytes int64) (*spoolQueue,
 		priority INTEGER NOT NULL DEFAULT 0,
 		attempts INTEGER NOT NULL DEFAULT 0,
 		created_at INTEGER NOT NULL
-	)`);
-		err != nil {
+	)`); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("spool schema: %w", err)
 	}

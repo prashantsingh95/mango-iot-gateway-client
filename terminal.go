@@ -40,21 +40,21 @@ type terminalAgent struct {
 	seq  int64
 	conn *websocket.Conn
 
-	mu         sync.Mutex
-	connected  bool
-	lastSeq    int64
-	sessions   map[string]*ptySession
-	uploads    map[string]*os.File
+	mu          sync.Mutex
+	connected   bool
+	lastSeq     int64
+	sessions    map[string]*ptySession
+	uploads     map[string]*os.File
 	uploadBytes map[string]int64
-	pingStart  int64
+	pingStart   int64
 }
 
 func startTerminalAgent(ctx context.Context) {
 	agent := &terminalAgent{
-		cfg:     cfg.Terminal,
-		key:     deriveSigningKey(hashAgentSecret(cfg.Terminal.AgentSecret), cfg.Terminal.SigningPepper),
-		sessions: make(map[string]*ptySession),
-		uploads:  make(map[string]*os.File),
+		cfg:         cfg.Terminal,
+		key:         deriveSigningKey(hashAgentSecret(cfg.Terminal.AgentSecret), cfg.Terminal.SigningPepper),
+		sessions:    make(map[string]*ptySession),
+		uploads:     make(map[string]*os.File),
 		uploadBytes: make(map[string]int64),
 	}
 
@@ -604,7 +604,7 @@ func (a *terminalAgent) handleFileData(msg *TerminalMessage) {
 	written := a.uploadBytes[msg.SessionID]
 	var over bool
 	if f != nil {
-		if int64(len(raw)) + written > maxBytes {
+		if int64(len(raw))+written > maxBytes {
 			over = true
 		} else {
 			if _, err := f.Write(raw); err == nil {
@@ -734,7 +734,7 @@ func tlsConfigInsecure() *tls.Config {
 	return &tls.Config{InsecureSkipVerify: true}
 }
 
-func runtimeGOOS() string  { return runtime.GOOS }
+func runtimeGOOS() string   { return runtime.GOOS }
 func runtimeGOARCH() string { return runtime.GOARCH }
 
 func hostname() string {

@@ -47,10 +47,10 @@ func (mc *modbusCollector) getAll() []ModbusValue {
 // ---------- Modbus Handler ----------
 
 type modbusHandler struct {
-	name     string
-	device   ModbusDevice
-	handler  modbus.ClientHandler
-	client   modbus.Client
+	name    string
+	device  ModbusDevice
+	handler modbus.ClientHandler
+	client  modbus.Client
 	// Phase 5 — the goburrow client is not goroutine-safe: the poll loop and
 	// on-demand read_register commands share one handler. Serialize all I/O.
 	mu sync.Mutex
@@ -188,13 +188,10 @@ func runModbusLoop(ctx context.Context) {
 		return
 	}
 
-	type poller struct {
-		handler  *modbusHandler
-		interval time.Duration
-		ticker   *time.Ticker
-	}
-
-	var pollers []*poller
+	// One goroutine per device with its own ticker: exact intervals, no
+	// 100ms busy-spin over all pollers. Each handler's I/O is already
+	// serialized by its own mutex (shared with on-demand read_register).
+	var wg sync.WaitGroup
 	for _, dev := range cfg.Modbus.Devices {
 		mh, ok := modbusPools[dev.Name]
 		if !ok {
@@ -204,39 +201,30 @@ func runModbusLoop(ctx context.Context) {
 		if interval <= 0 {
 			interval = 10
 		}
-		p := &poller{
-			handler:  mh,
-			interval: time.Duration(interval) * time.Second,
-			ticker:   time.NewTicker(time.Duration(interval) * time.Second),
-		}
-		pollers = append(pollers, p)
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			for _, p := range pollers {
-				p.ticker.Stop()
-			}
-			return
-		default:
-			for _, p := range pollers {
+		wg.Add(1)
+		go func(mh *modbusHandler, d time.Duration) {
+			defer wg.Done()
+			ticker := time.NewTicker(d)
+			defer ticker.Stop()
+			for {
 				select {
-				case <-p.ticker.C:
-					vals := p.handler.readRegisters()
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					vals := mh.readRegisters()
 					if modbusCol != nil {
-						modbusCol.set(p.handler.name, vals)
+						modbusCol.set(mh.name, vals)
 					}
 					if len(vals) > 0 {
 						logger.WithFields(logrus.Fields{
-							"device": p.handler.name,
+							"device": mh.name,
 							"values": len(vals),
 						}).Debug("modbus poll completed")
 					}
-				default:
 				}
 			}
-			time.Sleep(100 * time.Millisecond)
-		}
+		}(mh, time.Duration(interval)*time.Second)
 	}
+	<-ctx.Done()
+	wg.Wait()
 }

@@ -16,6 +16,7 @@
 #     --mqtt-pass MySecret123 \
 #     --token prov-token-abc123 \
 #     --device-id factory-gw-01
+#     --platform-url http://YOUR_PLATFORM_HOST:3001
 #
 # Arguments:
 #   --server URL      MQTT broker URL (required)
@@ -24,6 +25,7 @@
 #   --token TOKEN     Provisioning token from cloud UI
 #   --device-id ID    Unique device ID (default: auto from MAC)
 #   --name NAME       Human-readable name
+#   --platform-url URL Platform API URL (required for provisioning)
 #   --help
 #
 # Environment:
@@ -61,6 +63,7 @@ parse_args() {
       --token)      TOKEN="$2"; shift 2 ;;
       --device-id)  DEVICE_ID="$2"; shift 2 ;;
       --name)       GW_NAME="$2"; shift 2 ;;
+      --platform-url) PLATFORM_URL="$2"; shift 2 ;;
       --help|-h)
         echo "Usage: sudo bash setup.sh [options]"
         echo ""
@@ -71,13 +74,15 @@ parse_args() {
         echo "  --token TOKEN     Provisioning token (from cloud UI)"
         echo "  --device-id ID    Unique device ID (auto from MAC if not set)"
         echo "  --name NAME       Human-readable name"
+        echo "  --platform-url URL Platform API URL (required for provisioning)"
         echo "  --help            Show this help"
         echo ""
         echo "Example:"
         echo "  sudo bash setup.sh \\"
         echo "    --server mqtt://10.0.0.1:1883 \\"
         echo "    --mqtt-user iot --mqtt-pass MyPass123 \\"
-        echo "    --token abc-123 --device-id factory-gw-01"
+        echo "    --token abc-123 --device-id factory-gw-01 \\"
+        echo "    --platform-url http://10.0.0.1:3001"
         exit 0 ;;
       *) err "Unknown: $1. See --help" ;;
     esac
@@ -183,6 +188,11 @@ configure() {
     read -r -p "  Token: " TOKEN
   fi
 
+  if [[ -z "${PLATFORM_URL:-}" ]]; then
+    read -r -p "  Platform API URL (e.g. https://iot.example.com): " PLATFORM_URL
+    [[ -z "$PLATFORM_URL" ]] && err "Platform API URL required for provisioning"
+  fi
+
   # Auto device ID from MAC
   if [[ -z "${DEVICE_ID:-}" ]]; then
     local MAC
@@ -197,14 +207,17 @@ configure() {
 
   # Copy full config template if available, else generate complete config
   if [[ -f "$SCRIPT_DIR/config.yml" ]]; then
-    # Use template as base and override with CLI-provided values
+    # Use template as base and override with CLI-provided values.
+    # NOTE: keys are anchored (^ + leading whitespace + exact key) so that
+    # e.g. the name: pattern never clobbers username: or product_name:.
     sed \
-      -e "s|broker_url:.*|broker_url: \"${SERVER}\"|" \
-      -e "s|username:.*|username: \"${MQTT_USER:-}\"|" \
-      -e "s|password:.*|password: \"${MQTT_PASS:-}\"|" \
-      -e "s|device_id:.*|device_id: \"${DEVICE_ID}\"|" \
-      -e "s|name:.*|name: \"${GW_NAME}\"|" \
-      -e "s|provision_token:.*|provision_token: \"${TOKEN:-}\"|" \
+      -e "s|^\([[:space:]]*\)broker_url:.*|\1broker_url: \"${SERVER}\"|" \
+      -e "s|^\([[:space:]]*\)username:.*|\1username: \"${MQTT_USER:-}\"|" \
+      -e "s|^\([[:space:]]*\)password:.*|\1password: \"${MQTT_PASS:-}\"|" \
+      -e "s|^\([[:space:]]*\)device_id:.*|\1device_id: \"${DEVICE_ID}\"|" \
+      -e "s|^\([[:space:]]*\)name:.*|\1name: \"${GW_NAME}\"|" \
+      -e "s|^\([[:space:]]*\)provision_token:.*|\1provision_token: \"${TOKEN:-}\"|" \
+      -e "s|^\([[:space:]]*\)platform_url:.*|\1platform_url: \"${PLATFORM_URL}\"|" \
       "$SCRIPT_DIR/config.yml" > /opt/gateway/config.yml
   else
     # Generate complete config from scratch
@@ -224,7 +237,7 @@ mqtt:
   ssl: false
   qos: 1
   keep_alive: 60
-  clean_session: true
+  clean_session: false
   reconnect_delay: 5
   max_reconnect_delay: 60
   topics:
@@ -313,6 +326,8 @@ install_service() {
 Description=Mango IoT Gateway Agent
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -321,8 +336,6 @@ Group=gateway
 ExecStart=/usr/local/bin/gateway-agent --config /opt/gateway/config.yml
 Restart=always
 RestartSec=10
-StartLimitIntervalSec=300
-StartLimitBurst=5
 LimitNOFILE=65536
 StandardOutput=append:/var/log/gateway-agent.log
 StandardError=append:/var/log/gateway-agent.log

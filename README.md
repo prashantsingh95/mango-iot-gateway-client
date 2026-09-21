@@ -173,8 +173,23 @@ sudo bash setup.sh \
   --mqtt-user iot \
   --mqtt-pass YOUR_MQTT_PASSWORD \
   --token YOUR_PROVISION_TOKEN \
+  --platform-url http://YOUR_SERVER_IP:3001 \
   --device-id factory-gw-01 \
   --name "Factory Gateway #1"
+```
+
+`--platform-url` must be reachable from the Pi. Do not use `localhost` unless
+the platform backend is running on the same Pi. The token is generated from
+the platform's **Add Gateway** flow and is valid for the device number entered
+there.
+
+To configure an existing installation:
+
+```bash
+sudo nano /opt/gateway/config.yml
+# Set gateway.platform_url and gateway.provision_token
+sudo systemctl restart gateway-agent
+sudo journalctl -u gateway-agent -f
 ```
 
 ### 3. Enable Remote Terminal (Reverse-Connection)

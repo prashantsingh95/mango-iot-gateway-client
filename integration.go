@@ -1,23 +1,23 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"text/template"
-	"bytes"
 )
 
 // IntegrationConfig mirrors the cloud ExternalIntegration for the agent.
 // Secrets are not included; the agent receives only endpoint + topic + mappings.
 // Credentials are delivered via the deviceSecret-authenticated gateway config.
 type IntegrationConfig struct {
-	IntegrationID string                 `json:"integrationId"`
-	Name          string                 `json:"name"`
-	Type          string                 `json:"type"`
-	ConfigVersion int                    `json:"configVersion"`
-	Enabled       bool                   `json:"enabled"`
-	MQTT          MqttIntegrationConfig  `json:"mqtt"`
+	IntegrationID string                `json:"integrationId"`
+	Name          string                `json:"name"`
+	Type          string                `json:"type"`
+	ConfigVersion int                   `json:"configVersion"`
+	Enabled       bool                  `json:"enabled"`
+	MQTT          MqttIntegrationConfig `json:"mqtt"`
 }
 
 type MqttIntegrationConfig struct {

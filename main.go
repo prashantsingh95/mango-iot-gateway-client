@@ -26,7 +26,7 @@ var (
 	mqttClient     MQTT.Client
 	mqttMu         sync.Mutex
 	modbusPools    = make(map[string]*modbusHandler)
-	modbusMu      sync.RWMutex
+	modbusMu       sync.RWMutex
 	logger         = logrus.New()
 	logFile        *os.File
 	startTime      = time.Now()
@@ -160,6 +160,13 @@ func main() {
 
 	stampConfigRevision()
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Async publisher first: every publish below (status, telemetry, command
+	// responses) is non-blocking; the sender goroutine owns broker I/O.
+	startPublisher(ctx)
+
 	// Setup logging
 	switch cfg.Logging.Level {
 	case "debug":
@@ -201,29 +208,19 @@ func main() {
 
 	info, _ := psHost.Info()
 	logger.WithFields(logrus.Fields{
-		"device_id":  deviceID,
-		"serial":     serial,
-		"hostname":   info.Hostname,
-		"os":         info.OS,
-		"platform":   info.Platform,
-		"kernel":     info.KernelVersion,
-		"version":    version,
+		"device_id": deviceID,
+		"serial":    serial,
+		"hostname":  info.Hostname,
+		"os":        info.OS,
+		"platform":  info.Platform,
+		"kernel":    info.KernelVersion,
+		"version":   version,
 	}).Info("Mango IoT Gateway Agent starting")
 
-	// Open the offline spool BEFORE provisioning/connect so early events
-	// (including provision-time status) survive an outage (Phase 5 / §20).
-	// Always on by default; set queue.max_events: 0 to disable.
-	if cfg.Queue.MaxEvents > 0 {
-		if q, err := openSpool(cfg.Queue.Path, cfg.Queue.MaxEvents, cfg.Queue.TTLHours, int64(cfg.Queue.MaxMB)*1024*1024); err != nil {
-			logger.WithError(err).Warn("spool unavailable: outage events will be dropped")
-		} else {
-			spool = q
-			defer spool.close()
-			logger.WithFields(spoolLogFields(spool)).Info("offline spool open")
-		}
-	}
-
-	// New offline storage: two logical queues with chunked storage, quotas, priorities (§14-19)
+	// Offline storage (dual queues with chunked storage, quotas, priorities
+	// §14-19) is the primary outage buffer. Open it BEFORE provisioning/connect
+	// so early events (including provision-time status) survive an outage
+	// (Phase 5 / §20).
 	// Base path: /data/offline (shared SD card, 64GB) with gateway/ and external-devices/ subdirs
 	offlineBase := "/data/offline"
 	if _, err := os.Stat("/data"); os.IsNotExist(err) {
@@ -236,10 +233,23 @@ func main() {
 		offlineStorage = osStorage
 		defer offlineStorage.Close()
 		logger.WithFields(logrus.Fields{
-			"basePath": offlineBase,
-			"gatewayQueue": offlineStorage.gatewayQueue.Count(),
+			"basePath":      offlineBase,
+			"gatewayQueue":  offlineStorage.gatewayQueue.Count(),
 			"externalQueue": offlineStorage.externalQueue.Count(),
 		}).Info("offline storage initialized (gateway + external-device queues, chunked)")
+	}
+
+	// Legacy SQLite spool (queue.go) is fallback-only: it opens only when the
+	// new offline storage above is unavailable, so a healthy agent maintains a
+	// single queue instead of two. Set queue.max_events: 0 to disable entirely.
+	if offlineStorage == nil && cfg.Queue.MaxEvents > 0 {
+		if q, err := openSpool(cfg.Queue.Path, cfg.Queue.MaxEvents, cfg.Queue.TTLHours, int64(cfg.Queue.MaxMB)*1024*1024); err != nil {
+			logger.WithError(err).Warn("spool unavailable: outage events will be dropped")
+		} else {
+			spool = q
+			defer spool.close()
+			logger.WithFields(spoolLogFields(spool)).Info("offline spool open (legacy fallback)")
+		}
 	}
 
 	// OTA boot gate: if the previous boot installed new firmware, require a
@@ -301,18 +311,22 @@ func main() {
 	// Initialize GPIO via sysfs
 	initGPIO()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Start loops
+	// Start loops (ctx was created before provisioning so early publishes queue)
 	go runTelemetryLoop(ctx)
 	go runModbusLoop(ctx)
 	go startWatchdog(ctx)
 	go runSpoolFlushLoop(ctx)
 	go startIntegrationPoller(ctx)
 
-	// Reverse-connection terminal agent (optional)
-	if cfg.Terminal.Enabled && cfg.Terminal.BackendWSURL != "" && cfg.Terminal.AgentSecret != "" {
+	// Reverse-connection terminal agent (optional). Overlaps with the
+	// Cloudflare tunnel below (both give remote shell); enabling both is
+	// redundant — prefer one. Both stay dormant unless secrets are set.
+	terminalOn := cfg.Terminal.Enabled && cfg.Terminal.BackendWSURL != "" && cfg.Terminal.AgentSecret != ""
+	cfOn := cfg.Cloudflare.Enabled && cfg.Cloudflare.AgentSecret != ""
+	if terminalOn && cfOn {
+		logger.Warn("both terminal agent and cloudflare tunnel are enabled; running two remote shells is redundant — consider enabling only one")
+	}
+	if terminalOn {
 		go startTerminalAgent(ctx)
 		logger.Info("terminal agent: enabled (reverse-connection)")
 	}
@@ -337,8 +351,7 @@ func main() {
 		"go_os":     runtime.GOOS,
 	}).Info("Hardware info")
 
-	// Send initial status
-	time.Sleep(2 * time.Second) // wait for MQTT to settle
+	// Send initial status (non-blocking: queued to the async publisher)
 	sendStatus("ONLINE")
 
 	// Wait for signal (SIGINT/SIGTERM only; SIGHUP is handled separately)
@@ -348,12 +361,13 @@ func main() {
 
 	logger.WithField("signal", sig.String()).Info("shutting down")
 
+	// Enqueue final status, let the publisher flush it, then stop the world.
+	// Leftovers spill to the durable spool on cancel (no loss).
+	sendStatus("OFFLINE", "shutdown")
+	waitPublisherEmpty(5 * time.Second)
+
 	// Cancel all goroutine contexts first
 	cancel()
-
-	// Send final status
-	sendStatus("OFFLINE", "shutdown")
-	time.Sleep(500 * time.Millisecond)
 
 	// Graceful cleanup in order
 	mqttMu.Lock()

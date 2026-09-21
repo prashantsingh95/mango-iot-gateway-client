@@ -27,8 +27,14 @@ var customerMQTT = &customerMqttManager{
 }
 
 func (m *customerMqttManager) updateIntegrations(cfgs []IntegrationConfig) {
+	// Snapshot the diff under lock; all blocking network I/O (connects up
+	// to 15s, disconnects) happens outside so telemetry publishing never
+	// stalls behind a slow broker.
+	type pendingStart struct {
+		id  string
+		cfg IntegrationConfig
+	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	desired := make(map[string]IntegrationConfig, len(cfgs))
 	for _, c := range cfgs {
 		if !c.Enabled {
@@ -36,35 +42,46 @@ func (m *customerMqttManager) updateIntegrations(cfgs []IntegrationConfig) {
 		}
 		desired[c.IntegrationID] = c
 	}
-	// Stop removed
+	var toStop []MQTT.Client
 	for id, cli := range m.clients {
 		if _, ok := desired[id]; !ok {
-			cli.Disconnect(500)
+			toStop = append(toStop, cli)
 			delete(m.clients, id)
 			delete(m.integrations, id)
 			logger.WithField("integration", id).Info("customer mqtt: disconnected")
 		}
 	}
-	// Start/update
+	var toStart []pendingStart
 	for id, cfg := range desired {
 		prev, ok := m.integrations[id]
 		if ok && prev.ConfigVersion == cfg.ConfigVersion {
 			continue
 		}
 		if cli, ok := m.clients[id]; ok {
-			cli.Disconnect(500)
+			toStop = append(toStop, cli)
 			delete(m.clients, id)
 		}
-		cli, err := m.connectIntegration(cfg)
+		toStart = append(toStart, pendingStart{id: id, cfg: cfg})
+	}
+	m.mu.Unlock()
+
+	for _, cli := range toStop {
+		cli.Disconnect(500)
+	}
+	for _, p := range toStart {
+		cli, err := m.connectIntegration(p.cfg)
+		m.mu.Lock()
 		if err != nil {
-			logger.WithError(err).WithField("integration", id).Warn("customer mqtt: connect failed, will retry")
+			logger.WithError(err).WithField("integration", p.id).Warn("customer mqtt: connect failed, will retry")
 			// Keep config for retry on next update
-			m.integrations[id] = cfg
+			m.integrations[p.id] = p.cfg
+			m.mu.Unlock()
 			continue
 		}
-		m.clients[id] = cli
-		m.integrations[id] = cfg
-		logger.WithField("integration", id).Info("customer mqtt: connected")
+		m.clients[p.id] = cli
+		m.integrations[p.id] = p.cfg
+		m.mu.Unlock()
+		logger.WithField("integration", p.id).Info("customer mqtt: connected")
 	}
 }
 
@@ -123,13 +140,27 @@ func (m *customerMqttManager) connectIntegration(cfg IntegrationConfig) (MQTT.Cl
 
 // publishToCustomer routes a normalized message through the pipeline:
 // raw -> transform -> filter -> topic/payload template -> publish or spool on failure.
+// Snapshots clients under lock, then works lock-free so a slow broker never
+// blocks integration updates (or other publishers).
 func publishToCustomer(raw map[string]interface{}, source string) {
-	customerMQTT.mu.Lock()
-	defer customerMQTT.mu.Unlock()
-	if len(customerMQTT.clients) == 0 && len(customerMQTT.integrations) == 0 {
+	type route struct {
+		id  string
+		cfg IntegrationConfig
+		cli MQTT.Client
+	}
+	m := customerMQTT
+	m.mu.Lock()
+	if len(m.clients) == 0 && len(m.integrations) == 0 {
+		m.mu.Unlock()
 		return
 	}
-	for id, cfg := range customerMQTT.integrations {
+	routes := make([]route, 0, len(m.integrations))
+	for id, cfg := range m.integrations {
+		routes = append(routes, route{id: id, cfg: cfg, cli: m.clients[id]})
+	}
+	m.mu.Unlock()
+	for _, r := range routes {
+		id, cfg, cli := r.id, r.cfg, r.cli
 		// Transform first (always, even if offline, so spooled data is already processed)
 		mapped := transformFields(raw, cfg.MQTT.FieldMappings)
 		if !passesFilters(mapped, cfg.MQTT.Filters) {
@@ -150,8 +181,7 @@ func publishToCustomer(raw map[string]interface{}, source string) {
 			logger.WithError(err).WithField("integration", id).Warn("customer mqtt: payload render failed")
 			continue
 		}
-		cli, ok := customerMQTT.clients[id]
-		if !ok || !cli.IsConnected() {
+		if cli == nil || !cli.IsConnected() {
 			_ = spoolCustomerMessage(id, topic, cfg.MQTT.QoS, cfg.MQTT.Retain, payloadBytes, raw)
 			continue
 		}
@@ -184,11 +214,6 @@ func spoolCustomerMessage(integrationId, topic string, qos byte, retain bool, pa
 		return fmt.Errorf("spool disabled")
 	}
 	return spool.enqueue("customer."+integrationId, rawBytes, 5, newEventID())
-}
-
-func spoolOrCustomerEnqueue(integrationId string, payload []byte) error {
-	// Legacy shim: wrap payload as spooledMessage with dummy topic
-	return spoolCustomerMessage(integrationId, "customer/"+integrationId, 1, false, payload, nil)
 }
 
 func passesFilters(mapped map[string]interface{}, filters []FilterRule) bool {

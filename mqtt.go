@@ -161,17 +161,13 @@ func mqttPublish(topic string, qos byte, retained bool, payload []byte) error {
 func publishTelemetry(data interface{}) {
 	topic := strings.ReplaceAll(cfg.MQTT.Topics.Telemetry, "{device_id}", getDeviceID())
 	payload, _ := json.Marshal(data)
-	if err := mqttPublish(topic, cfg.MQTT.QoS, false, payload); err != nil {
-		spoolOrDrop("telemetry", topic, cfg.MQTT.QoS, false, payload, 5, "")
-	}
+	enqueuePublish("telemetry", topic, cfg.MQTT.QoS, false, payload, 5, newEventID())
 }
 
 func publishStatus(status StatusData) {
 	topic := strings.ReplaceAll(cfg.MQTT.Topics.Status, "{device_id}", getDeviceID())
 	payload, _ := json.Marshal(status)
-	if err := mqttPublish(topic, cfg.MQTT.QoS, true, payload); err != nil {
-		spoolOrDrop("status", topic, cfg.MQTT.QoS, true, payload, 10, "")
-	}
+	enqueuePublish("status", topic, cfg.MQTT.QoS, true, payload, 10, newEventID())
 }
 
 func publishLog(level, msg string, fields map[string]interface{}) {
@@ -188,8 +184,70 @@ func publishLog(level, msg string, fields map[string]interface{}) {
 		entry[k] = v
 	}
 	payload, _ := json.Marshal(entry)
-	if err := mqttPublish(topic, 0, false, payload); err != nil {
-		spoolOrDrop("log", topic, 0, false, payload, 1, "")
+	enqueuePublish("log", topic, 0, false, payload, 1, newEventID())
+}
+
+// ---------- Async publisher (real-time, non-blocking) ----------
+
+// publishCh decouples metric/command collection from network I/O: callers
+// never block on the broker (mqttPublish waits up to 5s per message).
+// One FIFO sender preserves global publish order; failures fall back to
+// the durable spool. A full channel also spills to spool — never blocks.
+const publishQueueSize = 512
+
+type asyncPub struct {
+	etype    string
+	topic    string
+	qos      byte
+	retained bool
+	payload  []byte
+	priority int
+	eventID  string
+}
+
+var publishCh = make(chan asyncPub, publishQueueSize)
+
+func startPublisher(ctx context.Context) {
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				// Best-effort: persist leftovers durably instead of dropping.
+				for {
+					select {
+					case m := <-publishCh:
+						spoolOrDrop(m.etype, m.topic, m.qos, m.retained, m.payload, m.priority, m.eventID)
+					default:
+						return
+					}
+				}
+			case m := <-publishCh:
+				if err := mqttPublish(m.topic, m.qos, m.retained, m.payload); err != nil {
+					spoolOrDrop(m.etype, m.topic, m.qos, m.retained, m.payload, m.priority, m.eventID)
+				}
+			}
+		}
+	}()
+}
+
+// enqueuePublish never blocks: overflow spills straight to the durable spool.
+func enqueuePublish(etype, topic string, qos byte, retained bool, payload []byte, priority int, eventID string) {
+	if eventID == "" {
+		eventID = newEventID()
+	}
+	m := asyncPub{etype: etype, topic: topic, qos: qos, retained: retained, payload: payload, priority: priority, eventID: eventID}
+	select {
+	case publishCh <- m:
+	default:
+		spoolOrDrop(etype, topic, qos, retained, payload, priority, eventID)
+	}
+}
+
+// waitPublisherEmpty lets queued messages reach the broker before shutdown.
+func waitPublisherEmpty(timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for len(publishCh) > 0 && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
@@ -203,7 +261,17 @@ func runSpoolFlushLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if isConnected() && spool != nil && spool.count() > 0 {
+			if !isConnected() {
+				continue
+			}
+			depth := 0
+			if spool != nil {
+				depth += spool.count()
+			}
+			if offlineStorage != nil {
+				depth += offlineStorage.gatewayQueue.Count() + offlineStorage.externalQueue.Count()
+			}
+			if depth > 0 {
 				flushSpool()
 			}
 		}

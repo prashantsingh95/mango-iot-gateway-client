@@ -16,9 +16,9 @@ import (
 // ---------- OTA authenticity + rollback (Phase 5 / §19) ----------
 
 type otaPending struct {
-	Version   string `json:"version"`
-	Deadline  int64  `json:"deadline_unix"`
-	Attempts  int    `json:"attempts"`
+	Version  string `json:"version"`
+	Deadline int64  `json:"deadline_unix"`
+	Attempts int    `json:"attempts"`
 }
 
 func otaPendingPath() string {

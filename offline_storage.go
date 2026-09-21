@@ -37,12 +37,12 @@ type StorageManager struct {
 
 	basePath string // /data/offline
 	// Quotas (configurable, not hard-coded)
-	offlineQuotaBytes           int64
-	warningThresholdPercent     int
-	criticalThresholdPercent    int
-	emergencyThresholdPercent   int
-	minimumFilesystemFreeBytes  int64
-	chunkMaxBytes               int64
+	offlineQuotaBytes          int64
+	warningThresholdPercent    int
+	criticalThresholdPercent   int
+	emergencyThresholdPercent  int
+	minimumFilesystemFreeBytes int64
+	chunkMaxBytes              int64
 
 	// Runtime state
 	state StorageState
@@ -59,14 +59,14 @@ func NewStorageManager(basePath string, offlineQuotaBytes int64, chunkMaxBytes i
 		chunkMaxBytes = 256 * 1024 * 1024 // 256MB per chunk
 	}
 	return &StorageManager{
-		basePath:                      basePath,
-		offlineQuotaBytes:             offlineQuotaBytes,
-		warningThresholdPercent:       70,
-		criticalThresholdPercent:      85,
-		emergencyThresholdPercent:     95,
-		minimumFilesystemFreeBytes:    2 * 1024 * 1024 * 1024, // 2GB safety reserve
-		chunkMaxBytes:                 chunkMaxBytes,
-		state:                         StateNormal,
+		basePath:                   basePath,
+		offlineQuotaBytes:          offlineQuotaBytes,
+		warningThresholdPercent:    70,
+		criticalThresholdPercent:   85,
+		emergencyThresholdPercent:  95,
+		minimumFilesystemFreeBytes: 2 * 1024 * 1024 * 1024, // 2GB safety reserve
+		chunkMaxBytes:              chunkMaxBytes,
+		state:                      StateNormal,
 	}
 }
 
@@ -123,13 +123,13 @@ func (sm *StorageManager) GetInfo() map[string]interface{} {
 		free = total - sm.offlineQuotaBytes
 	}
 	return map[string]interface{}{
-		"storageTotal":          total,
-		"storageFree":           free,
-		"offlineQuota":          sm.offlineQuotaBytes,
-		"offlineUsed":           0, // filled by caller
-		"storageState":          string(sm.GetState()),
-		"chunkMaxBytes":         sm.chunkMaxBytes,
-		"gatewayQueuePath":      filepath.Join(sm.basePath, "gateway"),
+		"storageTotal":            total,
+		"storageFree":             free,
+		"offlineQuota":            sm.offlineQuotaBytes,
+		"offlineUsed":             0, // filled by caller
+		"storageState":            string(sm.GetState()),
+		"chunkMaxBytes":           sm.chunkMaxBytes,
+		"gatewayQueuePath":        filepath.Join(sm.basePath, "gateway"),
 		"externalDeviceQueuePath": filepath.Join(sm.basePath, "external-devices"),
 	}
 }
@@ -421,11 +421,11 @@ func (cq *ChunkedQueue) Close() error {
 
 // OfflineStorage manages two independent queues
 type OfflineStorage struct {
-	mu             sync.Mutex
-	storageMgr     *StorageManager
-	gatewayQueue   *ChunkedQueue
-	externalQueue  *ChunkedQueue
-	basePath       string
+	mu            sync.Mutex
+	storageMgr    *StorageManager
+	gatewayQueue  *ChunkedQueue
+	externalQueue *ChunkedQueue
+	basePath      string
 }
 
 func NewOfflineStorage(basePath string, offlineQuotaBytes, chunkMaxBytes int64) (*OfflineStorage, error) {

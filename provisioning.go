@@ -46,13 +46,13 @@ func provisionGateway() {
 	raw, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		logger.Info("provisioning: gateway registered successfully")
-			// Cache returned deviceSecret/mqtt credentials for later authenticated fetches (integrations, config)
+		// Cache returned deviceSecret/mqtt credentials for later authenticated fetches (integrations, config)
 		var out struct {
-			DeviceSecret string `json:"deviceSecret"`
-			MQTTUsername string `json:"mqttUsername"`
-			MQTTPassword string `json:"mqttPassword"`
+			DeviceSecret  string `json:"deviceSecret"`
+			MQTTUsername  string `json:"mqttUsername"`
+			MQTTPassword  string `json:"mqttPassword"`
 			MqttBrokerURL string `json:"mqttBrokerUrl"`
-			Gateway      struct {
+			Gateway       struct {
 				DeviceID string `json:"deviceId"`
 				TenantID string `json:"tenantId"`
 			} `json:"gateway"`
@@ -117,6 +117,11 @@ func provisionGateway() {
 			}
 		}
 	} else {
-		logger.WithFields(logrus.Fields{"status": resp.StatusCode, "response": string(raw)}).Warn("provisioning: unexpected response")
+		fields := logrus.Fields{"status": resp.StatusCode, "response": string(raw)}
+		if resp.StatusCode == 404 {
+			logger.WithFields(fields).Error("provisioning: token invalid or spent (create a fresh token to re-provision); continuing with stored credentials")
+		} else {
+			logger.WithFields(fields).Warn("provisioning: unexpected response")
+		}
 	}
 }

@@ -89,10 +89,10 @@ func collectSystemMetrics() map[string]interface{} {
 		for _, p := range partitions {
 			if usage, err := psDisk.Usage(p.Mountpoint); err == nil {
 				diskMetrics[p.Mountpoint] = map[string]interface{}{
-					"total_gb":  int(usage.Total / 1024 / 1024 / 1024),
-					"used_gb":   int(usage.Used / 1024 / 1024 / 1024),
-					"free_gb":   int(usage.Free / 1024 / 1024 / 1024),
-					"used_pct":  math.Round(usage.UsedPercent*100) / 100,
+					"total_gb": int(usage.Total / 1024 / 1024 / 1024),
+					"used_gb":  int(usage.Used / 1024 / 1024 / 1024),
+					"free_gb":  int(usage.Free / 1024 / 1024 / 1024),
+					"used_pct": math.Round(usage.UsedPercent*100) / 100,
 				}
 			}
 		}
@@ -140,7 +140,10 @@ func getCPUTemperature() float64 {
 }
 
 func getCoreVoltage() float64 {
-	data, err := exec.Command("vcgencmd", "measure_volts", "core").Output()
+	// Bounded: a wedged vcgencmd must never stall the telemetry loop.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	data, err := exec.CommandContext(ctx, "vcgencmd", "measure_volts", "core").Output()
 	if err != nil {
 		return 0
 	}
@@ -273,20 +276,20 @@ func sendStatus(status string, reason ...string) {
 		r = reason[0]
 	}
 	s := StatusData{
-		DeviceID:     getDeviceID(),
-		Status:       status,
-		Reason:       r,
-		Uptime:       int64(time.Since(startTime).Seconds()),
-		Version:      version,
-		IP:           getIPAddress(),
-		LastSeen:     time.Now().UTC().Format(time.RFC3339),
-		FirmwareVer:  version,
-		SerialNumber: getSerialNumber(),
-		Model:        getModel(),
-		Manufacturer: getManufacturer(),
-		MACAddress:   getMACAddress(),
-		HardwareVer:  getHardwareVersion(),
-		OSVersion:    getOSVersion(),
+		DeviceID:       getDeviceID(),
+		Status:         status,
+		Reason:         r,
+		Uptime:         int64(time.Since(startTime).Seconds()),
+		Version:        version,
+		IP:             getIPAddress(),
+		LastSeen:       time.Now().UTC().Format(time.RFC3339),
+		FirmwareVer:    version,
+		SerialNumber:   getSerialNumber(),
+		Model:          getModel(),
+		Manufacturer:   getManufacturer(),
+		MACAddress:     getMACAddress(),
+		HardwareVer:    getHardwareVersion(),
+		OSVersion:      getOSVersion(),
 		ConfigRevision: configRevision,
 		ConfigHash:     configHash,
 	}

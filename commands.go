@@ -27,6 +27,7 @@ type CommandRequest struct {
 
 type CommandResponse struct {
 	ID        string      `json:"id"`
+	CommandID string      `json:"commandId"`
 	Status    string      `json:"status"`
 	Success   bool        `json:"success"`
 	Result    interface{} `json:"result,omitempty"`
@@ -134,35 +135,54 @@ func handleCommand(client MQTT.Client, msg MQTT.Message) {
 		return
 	}
 
+	// Bounded async command dispatch: the paho callback must never block on
+	// execution (run_shell up to 30s, firmware downloads). Validation above is
+	// synchronous and fast; dedup marks the ID before dispatch so a redelivery
+	// racing execution still ACKs as duplicate instead of double-running.
+	var commandSem = make(chan struct{}, 4)
+
 	logger.WithFields(logrus.Fields{"id": cmd.ID, "type": cmd.Type}).Info("received command")
 
-	var resp CommandResponse
-	resp.ID = cmd.ID
-	resp.Timestamp = time.Now().UTC().Format(time.RFC3339)
+	go func(cmd CommandRequest) {
+		select {
+		case commandSem <- struct{}{}:
+		default:
+			sendCommandResponse(CommandResponse{
+				ID: cmd.ID, Status: "rejected", Error: "too many concurrent commands, retry later",
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+			})
+			return
+		}
+		defer func() { <-commandSem }()
 
-	switch cmd.Type {
-	case "reboot":
-		resp = execReboot(cmd)
-	case "restart_agent":
-		resp = execRestartAgent(cmd)
-	case "update_config":
-		resp = execUpdateConfig(cmd)
-	case "run_shell":
-		resp = execShell(cmd)
-	case "update_firmware":
-		resp = execFirmwareUpdate(cmd)
-	case "set_relay":
-		resp = execSetRelay(cmd)
-	case "read_register":
-		resp = execReadRegister(cmd)
-	case "wifi_ap.status", "wifi_ap.enable", "wifi_ap.disable", "wifi_ap.configure", "wifi_ap.clients", "wifi_ap.ping_client":
-		resp = execWifiAP(cmd)
-	default:
-		resp.Status = "rejected"
-		resp.Error = fmt.Sprintf("unknown command type: %s", cmd.Type)
-	}
+		var resp CommandResponse
+		resp.ID = cmd.ID
+		resp.Timestamp = time.Now().UTC().Format(time.RFC3339)
 
-	sendCommandResponse(resp)
+		switch cmd.Type {
+		case "reboot":
+			resp = execReboot(cmd)
+		case "restart_agent":
+			resp = execRestartAgent(cmd)
+		case "update_config":
+			resp = execUpdateConfig(cmd)
+		case "run_shell":
+			resp = execShell(cmd)
+		case "update_firmware":
+			resp = execFirmwareUpdate(cmd)
+		case "set_relay":
+			resp = execSetRelay(cmd)
+		case "read_register":
+			resp = execReadRegister(cmd)
+		case "wifi_ap.status", "wifi_ap.enable", "wifi_ap.disable", "wifi_ap.configure", "wifi_ap.clients", "wifi_ap.ping_client":
+			resp = execWifiAP(cmd)
+		default:
+			resp.Status = "rejected"
+			resp.Error = fmt.Sprintf("unknown command type: %s", cmd.Type)
+		}
+
+		sendCommandResponse(resp)
+	}(cmd)
 }
 
 func execReboot(cmd CommandRequest) CommandResponse {
@@ -424,11 +444,13 @@ func sendCommandResponse(resp CommandResponse) {
 	if resp.ID == "" {
 		return
 	}
+	resp.CommandID = resp.ID
 	topic := strings.ReplaceAll(cfg.MQTT.Topics.Response, "{device_id}", getDeviceID())
 	if strings.Contains(topic, "{device_id}") {
 		return
 	}
 	resp.Success = resp.Status == "completed"
 	payload, _ := json.Marshal(resp)
-	mqttPublish(topic, cfg.MQTT.QoS, false, payload)
+	// Non-blocking with durable fallback: responses survive outages too.
+	enqueuePublish("command-response", topic, cfg.MQTT.QoS, false, payload, 10, "resp-"+resp.ID)
 }

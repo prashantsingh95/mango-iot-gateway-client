@@ -112,7 +112,9 @@ func TestDevelopmentAnonymousExplicit(t *testing.T) {
 func TestProvisioningRejectsEmpty(t *testing.T) {
 	// Simulate existing valid config (save/restore global to avoid polluting other tests)
 	savedUsername, savedPassword, savedBroker := cfg.MQTT.Username, cfg.MQTT.Password, cfg.MQTT.BrokerURL
-	defer func() { cfg.MQTT.Username, cfg.MQTT.Password, cfg.MQTT.BrokerURL = savedUsername, savedPassword, savedBroker }()
+	defer func() {
+		cfg.MQTT.Username, cfg.MQTT.Password, cfg.MQTT.BrokerURL = savedUsername, savedPassword, savedBroker
+	}()
 	cfg.MQTT.Username = "existing-user"
 	cfg.MQTT.Password = "existing-pass"
 	cfg.MQTT.BrokerURL = "mqtts://broker.example.com:8883"
@@ -196,14 +198,16 @@ func TestSecretLogging(t *testing.T) {
 	}
 }
 
-func contains(s, substr string) bool { return len(s) >= len(substr) && (func() bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (func() bool {
+		for i := 0; i <= len(s)-len(substr); i++ {
+			if s[i:i+len(substr)] == substr {
+				return true
+			}
 		}
-	}
-	return false
-})() }
+		return false
+	})()
+}
 
 // Additional: clean_session must be false in production
 func TestCleanSessionFalseRequired(t *testing.T) {
