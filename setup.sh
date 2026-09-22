@@ -9,23 +9,36 @@
 #   # Interactive (prompts for missing values)
 #   sudo bash setup.sh
 #
-#   # Fully automated
+#   # Fully automated — telemetry + provisioning + remote terminal in ONE command
+#   # (fresh Pi OS: apt-get install -y git && git clone <repo> && cd mango-iot-gateway-client && run:)
 #   sudo bash setup.sh \
-#     --server mqtt://your-server.com:1883 \
+#     --server mqtts://your-broker.com:8883 \
 #     --mqtt-user iot \
 #     --mqtt-pass MySecret123 \
 #     --token prov-token-abc123 \
-#     --device-id factory-gw-01
-#     --platform-url http://YOUR_PLATFORM_HOST:3001
+#     --device-id factory-gw-01 \
+#     --name "Factory Gateway #1" \
+#     --platform-url http://YOUR_PLATFORM_HOST:3001 \
+#     --agent-secret ONE_TIME_AGENT_SECRET \
+#     --ws-url ws://YOUR_PLATFORM_HOST:3001 \
+#     --signing-pepper YOUR_TERMINAL_SIGNING_PEPPER
 #
 # Arguments:
-#   --server URL      MQTT broker URL (required)
-#   --mqtt-user USER  MQTT username   (required if server has auth)
-#   --mqtt-pass PASS  MQTT password
-#   --token TOKEN     Provisioning token from cloud UI
-#   --device-id ID    Unique device ID (default: auto from MAC)
-#   --name NAME       Human-readable name
-#   --platform-url URL Platform API URL (required for provisioning)
+#   --server URL        MQTT broker URL (required). mqtts:// auto-enables TLS.
+#   --mqtt-user USER    MQTT username   (required if server has auth)
+#   --mqtt-pass PASS    MQTT password
+#   --mqtt-ssl BOOL     Force MQTT TLS on/off (default: auto from --server scheme)
+#   --token TOKEN       Provisioning token from cloud UI (Provisioning page)
+#   --device-id ID      Unique device ID (default: auto from MAC)
+#   --name NAME         Human-readable name
+#   --platform-url URL  Platform API URL (required for provisioning)
+#   --agent-secret SEC  One-time terminal agent secret (Platform: open the
+#                       gateway → Terminal tab → Issue secret). Enables the
+#                       remote-terminal block in one command.
+#   --ws-url URL        Backend WebSocket URL for terminal (default: derived
+#                       from --platform-url, http→ws / https→wss)
+#   --signing-pepper P  Must equal backend TERMINAL_SIGNING_PEPPER
+#   --terminal-shell S  Shell for remote terminal (default: /bin/bash)
 #   --help
 #
 # Environment:
@@ -60,29 +73,42 @@ parse_args() {
       --server)     SERVER="$2"; shift 2 ;;
       --mqtt-user)  MQTT_USER="$2"; shift 2 ;;
       --mqtt-pass)  MQTT_PASS="$2"; shift 2 ;;
+      --mqtt-ssl)   MQTT_SSL="$2"; shift 2 ;;
       --token)      TOKEN="$2"; shift 2 ;;
       --device-id)  DEVICE_ID="$2"; shift 2 ;;
       --name)       GW_NAME="$2"; shift 2 ;;
       --platform-url) PLATFORM_URL="$2"; shift 2 ;;
+      --agent-secret) AGENT_SECRET="$2"; shift 2 ;;
+      --ws-url) WS_URL="$2"; shift 2 ;;
+      --signing-pepper) SIGNING_PEPPER="$2"; shift 2 ;;
+      --terminal-shell) TERMINAL_SHELL="$2"; shift 2 ;;
       --help|-h)
         echo "Usage: sudo bash setup.sh [options]"
         echo ""
         echo "Options:"
-        echo "  --server URL      MQTT broker URL (e.g. mqtt://10.0.0.1:1883)"
-        echo "  --mqtt-user USER  MQTT username"
-        echo "  --mqtt-pass PASS  MQTT password"
-        echo "  --token TOKEN     Provisioning token (from cloud UI)"
-        echo "  --device-id ID    Unique device ID (auto from MAC if not set)"
-        echo "  --name NAME       Human-readable name"
-        echo "  --platform-url URL Platform API URL (required for provisioning)"
-        echo "  --help            Show this help"
+        echo "  --server URL        MQTT broker URL (e.g. mqtts://broker:8883, mqtt://10.0.0.1:1883)"
+        echo "  --mqtt-user USER    MQTT username"
+        echo "  --mqtt-pass PASS    MQTT password"
+        echo "  --mqtt-ssl BOOL     true/false (default: auto — on for mqtts:// or ssl://)"
+        echo "  --token TOKEN       Provisioning token (from cloud UI > Provisioning)"
+        echo "  --device-id ID      Unique device ID (auto from MAC if not set)"
+        echo "  --name NAME         Human-readable name"
+        echo "  --platform-url URL  Platform API URL (required for provisioning)"
+        echo "  --agent-secret SEC  One-time terminal agent secret (enables remote terminal)"
+        echo "  --ws-url URL        Backend WS URL (default: derived from --platform-url)"
+        echo "  --signing-pepper P  Must match backend TERMINAL_SIGNING_PEPPER"
+        echo "  --terminal-shell S  Shell for remote terminal (default: /bin/bash)"
+        echo "  --help              Show this help"
         echo ""
-        echo "Example:"
+        echo "One-command example (telemetry + provisioning + terminal):"
         echo "  sudo bash setup.sh \\"
-        echo "    --server mqtt://10.0.0.1:1883 \\"
+        echo "    --server mqtts://broker.example.com:8883 \\"
         echo "    --mqtt-user iot --mqtt-pass MyPass123 \\"
         echo "    --token abc-123 --device-id factory-gw-01 \\"
-        echo "    --platform-url http://10.0.0.1:3001"
+        echo "    --name \"Factory Gateway #1\" \\"
+        echo "    --platform-url http://10.0.0.1:3001 \\"
+        echo "    --agent-secret ONE_TIME_SECRET \\"
+        echo "    --signing-pepper PEPPER_FROM_BACKEND_ENV"
         exit 0 ;;
       *) err "Unknown: $1. See --help" ;;
     esac
@@ -203,6 +229,21 @@ configure() {
   local IP; IP=$(hostname -I | awk '{print $1}')
   GW_NAME="${GW_NAME:-Pi Gateway ${IP}}"
 
+  # MQTT TLS: explicit --mqtt-ssl wins, else auto from scheme (mqtts://, ssl://)
+  if [[ -z "${MQTT_SSL:-}" ]]; then
+    case "${SERVER}" in
+      mqtts://*|ssl://*) MQTT_SSL="true" ;;
+      *) MQTT_SSL="false" ;;
+    esac
+  fi
+
+  # Terminal WS URL defaults to the platform URL with http→ws / https→wss
+  if [[ -z "${WS_URL:-}" && -n "${PLATFORM_URL:-}" ]]; then
+    WS_URL="${PLATFORM_URL/#http:/ws:}"
+    WS_URL="${WS_URL/#https:/wss:}"
+  fi
+  TERMINAL_SHELL="${TERMINAL_SHELL:-/bin/bash}"
+
   mkdir -p /opt/gateway
 
   # Copy full config template if available, else generate complete config
@@ -214,6 +255,7 @@ configure() {
       -e "s|^\([[:space:]]*\)broker_url:.*|\1broker_url: \"${SERVER}\"|" \
       -e "s|^\([[:space:]]*\)username:.*|\1username: \"${MQTT_USER:-}\"|" \
       -e "s|^\([[:space:]]*\)password:.*|\1password: \"${MQTT_PASS:-}\"|" \
+      -e "s|^\([[:space:]]*\)ssl:.*|\1ssl: ${MQTT_SSL}|" \
       -e "s|^\([[:space:]]*\)device_id:.*|\1device_id: \"${DEVICE_ID}\"|" \
       -e "s|^\([[:space:]]*\)name:.*|\1name: \"${GW_NAME}\"|" \
       -e "s|^\([[:space:]]*\)provision_token:.*|\1provision_token: \"${TOKEN:-}\"|" \
@@ -234,7 +276,7 @@ mqtt:
   username: "${MQTT_USER:-}"
   password: "${MQTT_PASS:-}"
   client_id_prefix: "gw"
-  ssl: false
+  ssl: ${MQTT_SSL:-false}
   qos: 1
   keep_alive: 60
   clean_session: false
@@ -299,6 +341,47 @@ YAML
 
   chmod 644 /opt/gateway/config.yml
   log "Config: /opt/gateway/config.yml"
+
+  # ── Remote terminal (one-command setup) ──────────────────────
+  # Needs --agent-secret (one-time secret from platform gateway Terminal tab)
+  # gateway_id stays empty: the agent auto-uses the platform UUID persisted
+  # at provisioning time (terminal.go gatewayID()).
+  if [[ -n "${AGENT_SECRET:-}" ]]; then
+    [[ -z "${WS_URL:-}" ]] && err "--agent-secret needs --ws-url or --platform-url for backend_ws_url"
+    [[ -z "${SIGNING_PEPPER:-}" ]] && err "--agent-secret needs --signing-pepper (must match backend TERMINAL_SIGNING_PEPPER)"
+    if grep -q '^terminal:' /opt/gateway/config.yml; then
+      # Drop the old terminal block (up to the next top-level key), then append fresh
+      awk '/^terminal:/{skip=1; next} /^[A-Za-z_]+:/{skip=0} !skip' \
+        /opt/gateway/config.yml > /opt/gateway/config.yml.new \
+        && mv /opt/gateway/config.yml.new /opt/gateway/config.yml
+    fi
+    cat >> /opt/gateway/config.yml << YAML
+
+# Remote terminal (reverse-connection, no inbound ports). Configured by setup.sh.
+terminal:
+  enabled: true
+  gateway_id: ""                   # auto: platform UUID persisted at provisioning
+  backend_ws_url: "${WS_URL}"
+  agent_secret: "${AGENT_SECRET}"
+  signing_pepper: "${SIGNING_PEPPER}"
+  heartbeat_ms: 30000
+  reconnect_base_ms: 1000
+  reconnect_max_ms: 30000
+  shell: "${TERMINAL_SHELL}"
+  shell_allowlist:
+    - "${TERMINAL_SHELL}"
+  file_dir: "/tmp"
+  max_file_bytes: 26214400
+  idle_timeout_minutes: 30
+  max_session_hours: 8
+  max_sessions: 5
+  insecure_skip_verify: false
+YAML
+    chmod 600 /opt/gateway/config.yml
+    log "Remote terminal: ENABLED (ws: ${WS_URL})"
+  else
+    info "Remote terminal: disabled (pass --agent-secret to enable in one command)"
+  fi
 
   # Example custom script
   mkdir -p /opt/gateway/scripts
@@ -377,8 +460,14 @@ start_agent() {
   echo -e "${GREEN}╚═════════════════════════════════════════════╝${NC}"
   echo ""
   echo -e "  ${CYAN}Server:${NC}    ${SERVER}"
+  echo -e "  ${CYAN}MQTT TLS:${NC}  ${MQTT_SSL:-false}"
   echo -e "  ${CYAN}Device:${NC}    ${DEVICE_ID}"
   echo -e "  ${CYAN}Config:${NC}    /opt/gateway/config.yml"
+  if [[ -n "${AGENT_SECRET:-}" ]]; then
+  echo -e "  ${CYAN}Terminal:${NC}  enabled (${WS_URL:-})"
+  else
+  echo -e "  ${CYAN}Terminal:${NC}  disabled (re-run with --agent-secret to enable)"
+  fi
   echo -e "  ${CYAN}Logs:${NC}      journalctl -u gateway-agent -f"
   echo -e "  ${CYAN}Status:${NC}    systemctl status gateway-agent"
   echo -e "  ${CYAN}Restart:${NC}   systemctl restart gateway-agent"

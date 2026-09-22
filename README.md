@@ -184,22 +184,32 @@ After platform setup, login at `http://YOUR_SERVER_IP:3000` and:
 
 ### 2. Install Gateway Agent on Pi (One Command)
 
-```bash
-# From your machine:
-scp -r gateway-client pi@YOUR_PI_IP:~/
-ssh pi@YOUR_PI_IP
-cd gateway-client
+On a fresh Pi OS, only git is needed — clone and run **one command** with all
+details (telemetry + provisioning + remote terminal):
 
-# Fully automated install with all params
+```bash
+# On the Pi:
+sudo apt-get install -y git
+git clone https://github.com/prashantsingh95/mango-iot-gateway-client.git
+cd mango-iot-gateway-client
+
+# ONE command — everything included:
 sudo bash setup.sh \
-  --server mqtt://YOUR_SERVER_IP:1883 \
+  --server mqtts://YOUR_BROKER_HOST:8883 \
   --mqtt-user iot \
   --mqtt-pass YOUR_MQTT_PASSWORD \
   --token YOUR_PROVISION_TOKEN \
   --platform-url http://YOUR_SERVER_IP:3001 \
   --device-id factory-gw-01 \
-  --name "Factory Gateway #1"
+  --name "Factory Gateway #1" \
+  --agent-secret ONE_TIME_AGENT_SECRET \
+  --signing-pepper YOUR_TERMINAL_SIGNING_PEPPER
+# --ws-url defaults to --platform-url with http→ws; --mqtt-ssl auto-detects mqtts://
 ```
+
+Get the values from the platform **Provisioning page**: it generates this exact
+command with your token prefilled (Gateway Client Setup card), plus the
+terminal secret issuer (Remote Terminal Setup card).
 
 `--platform-url` must be reachable from the Pi. Do not use `localhost` unless
 the platform backend is running on the same Pi. The token is generated from
@@ -219,6 +229,10 @@ sudo journalctl -u gateway-agent -f
 The browser terminal does **not** use SSH. This agent opens an **outbound TLS
 WebSocket** to the platform's `/agent` Socket.IO namespace — no inbound ports,
 works behind NAT/CGNAT/firewall.
+
+**Easiest: pass it in the one-command install** (`--agent-secret` +
+`--signing-pepper` in step 2) — `setup.sh` writes the whole `terminal:` block
+for you. Manual alternative:
 
 **a) Issue an agent secret** (Admin) from the platform API or UI:
 ```bash
