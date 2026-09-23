@@ -336,23 +336,33 @@ func (cq *ChunkedQueue) enforceQuota() error {
 func (cq *ChunkedQueue) FetchBatch(limit int) ([]QueuedRecord, error) {
 	cq.mu.Lock()
 	defer cq.mu.Unlock()
-	// FIFO: oldest first, but priority-aware (higher priority first within FIFO)
+	// FIFO: oldest first, but priority-aware (higher priority first within FIFO).
+	// Critical: scan+close BEFORE any Exec. The pool is MaxOpenConns(1); issuing
+	// UPDATE while rows are still open deadlocks the single connection and
+	// wedges the whole agent (flush holds mu; Count/Enqueue wait forever).
 	rows, err := cq.db.Query(`SELECT id, record_id, gateway_id, external_device_id, integration_id, sequence, priority, payload FROM events WHERE state='PENDING' ORDER BY priority DESC, created_at ASC, id ASC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	var out []QueuedRecord
 	for rows.Next() {
 		var r QueuedRecord
 		if err := rows.Scan(&r.ID, &r.RecordID, &r.GatewayID, &r.ExternalDeviceID, &r.IntegrationID, &r.Sequence, &r.Priority, &r.Payload); err != nil {
+			rows.Close()
 			return nil, err
 		}
 		out = append(out, r)
-		// Mark as SENDING for crash recovery
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	for _, r := range out {
+		// Mark as SENDING for crash recovery (separate pass; connection free).
 		_, _ = cq.db.Exec(`UPDATE events SET state='SENDING' WHERE id=?`, r.ID)
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 type QueuedRecord struct {
@@ -393,6 +403,15 @@ func (cq *ChunkedQueue) RecoverSending() error {
 }
 
 func (cq *ChunkedQueue) Count() int {
+	cq.mu.Lock()
+	defer cq.mu.Unlock()
+	return cq.countLocked()
+}
+
+func (cq *ChunkedQueue) countLocked() int {
+	if cq.db == nil {
+		return 0
+	}
 	var n int
 	_ = cq.db.QueryRow(`SELECT COUNT(*) FROM events`).Scan(&n)
 	// Also count sealed chunks
@@ -469,28 +488,13 @@ func (s *OfflineStorage) GetStorageInfo() map[string]interface{} {
 	// Calculate used bytes via WalkDir (Glob does not support **)
 	used := int64(0)
 	_ = filepath.WalkDir(s.basePath, func(path string, d os.DirEntry, err error) error {
-		if err == nil && !d.IsDir() && filepath.Ext(path) == ".db" {
-			if fi, err := d.Info(); err == nil {
-				used += fi.Size()
+		if err == nil && !d.IsDir() {
+			ext := filepath.Ext(path)
+			if ext == ".db" || ext == ".db-wal" || ext == ".db-shm" || ext == ".wal" || ext == ".shm" {
+				if fi, err := d.Info(); err == nil {
+					used += fi.Size()
+				}
 			}
-		}
-		if err == nil && !d.IsDir() && (filepath.Ext(path) == ".db-wal" || filepath.Ext(path) == ".db-shm") {
-			if fi, err := d.Info(); err == nil {
-				used += fi.Size()
-			}
-		}
-		// Also match .db-wal/.db-shm via suffix check
-		if err == nil && !d.IsDir() && (filepath.Ext(path) == ".wal" || filepath.Ext(path) == ".shm") {
-			if fi, err := d.Info(); err == nil {
-				used += fi.Size()
-			}
-		}
-		return nil
-	})
-	// Fallback for .db-wal files not caught by Ext check (e.g., active.db-wal has ext .db-wal not .wal)
-	_ = filepath.WalkDir(s.basePath, func(path string, d os.DirEntry, err error) error {
-		if err == nil && !d.IsDir() && (filepath.Ext(path) == ".db" || filepath.Ext(path) == ".db-wal" || filepath.Ext(path) == ".db-shm") {
-			// Already counted above if .db, but double count is okay for WAL
 		}
 		return nil
 	})
@@ -501,6 +505,11 @@ func (s *OfflineStorage) GetStorageInfo() map[string]interface{} {
 }
 
 func (s *OfflineStorage) getOldestTimestamp(cq *ChunkedQueue) interface{} {
+	cq.mu.Lock()
+	defer cq.mu.Unlock()
+	if cq.db == nil {
+		return nil
+	}
 	var ts sql.NullInt64
 	_ = cq.db.QueryRow(`SELECT MIN(created_at) FROM events`).Scan(&ts)
 	if ts.Valid {

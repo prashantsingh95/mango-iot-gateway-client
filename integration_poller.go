@@ -1,9 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -48,9 +48,13 @@ func fetchAndApplyIntegrations() {
 		logger.Debug("integrations: no device secret cached, skipping fetch")
 		return
 	}
-	url := strings.TrimRight(cfg.Gateway.PlatformURL, "/") + fmt.Sprintf("/api/v1/integrations/gateway/config?deviceId=%s&deviceSecret=%s", deviceID, secret)
+	url := strings.TrimRight(cfg.Gateway.PlatformURL, "/") + "/api/v1/integrations/gateway/config"
+	reqBody, _ := json.Marshal(map[string]string{
+		"deviceId":     deviceID,
+		"deviceSecret": secret,
+	})
 	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(url)
+	resp, err := client.Post(url, "application/json", bytes.NewReader(reqBody))
 	if err != nil {
 		logger.WithError(err).Warn("integrations: fetch failed")
 		return

@@ -204,6 +204,7 @@ type GatewayConfig struct {
 	TenantID       string `yaml:"tenant_id"`
 	ProvisionToken string `yaml:"provision_token"`
 	PlatformURL    string `yaml:"platform_url"`
+	OfflinePath    string `yaml:"offline_path"` // override for offline storage base path (default /data/offline on Linux)
 }
 
 // BrandingConfig carries tenant/OEM identity (SaaS §22). Configuration-driven —

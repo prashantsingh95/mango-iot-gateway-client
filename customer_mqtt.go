@@ -101,7 +101,7 @@ func (m *customerMqttManager) connectIntegration(cfg IntegrationConfig) (MQTT.Cl
 		clientID = fmt.Sprintf("gw-%s-%s", getDeviceID(), cfg.IntegrationID[:8])
 	}
 	opts.SetClientID(clientID)
-	opts.SetCleanSession(true)
+	opts.SetCleanSession(false)
 	opts.SetKeepAlive(time.Duration(60) * time.Second)
 	opts.SetAutoReconnect(true)
 	opts.SetConnectRetry(true)

@@ -377,6 +377,8 @@ func flushGatewayQueue() {
 	if offlineStorage == nil || offlineStorage.gatewayQueue == nil {
 		return
 	}
+	// Reset any rows stuck SENDING from a prior crash/failed flush.
+	_ = offlineStorage.gatewayQueue.RecoverSending()
 	batch := cfg.Queue.FlushBatch
 	if batch <= 0 {
 		batch = 100
@@ -400,13 +402,15 @@ func flushGatewayQueue() {
 			}
 			if err := mqttPublish(msg.Topic, msg.QoS, msg.Retained, msg.Payload); err != nil {
 				failed = append(failed, r.ID)
-				break
+				break // stop at first failure to preserve ordering
 			}
 			acked = append(acked, r.ID)
 		}
 		_ = offlineStorage.gatewayQueue.Ack(acked)
-		// For priority bump, we need to handle failed - but our ChunkedQueue doesn't have bumpAttempts, it has state
 		if len(failed) > 0 {
+			// Return failed rows to PENDING so the next flush retries them —
+			// leaving them SENDING permanently stalls the queue.
+			_ = offlineStorage.gatewayQueue.RecoverSending()
 			return
 		}
 	}

@@ -221,9 +221,12 @@ func main() {
 	// §14-19) is the primary outage buffer. Open it BEFORE provisioning/connect
 	// so early events (including provision-time status) survive an outage
 	// (Phase 5 / §20).
-	// Base path: /data/offline (shared SD card, 64GB) with gateway/ and external-devices/ subdirs
+	// Base path: /data/offline (shared SD card, 64GB) with gateway/ and external-devices/ subdirs.
+	// Configurable via gateway.offline_path; falls back to /data/offline on Linux, config dir otherwise.
 	offlineBase := "/data/offline"
-	if _, err := os.Stat("/data"); os.IsNotExist(err) {
+	if cfg.Gateway.OfflinePath != "" {
+		offlineBase = cfg.Gateway.OfflinePath
+	} else if _, err := os.Stat("/data"); os.IsNotExist(err) {
 		offlineBase = filepath.Join(filepath.Dir(configFile), "offline")
 	}
 	// Quota: 2GB offline data (configurable), 256MB per chunk, 2GB safety reserve
@@ -361,15 +364,15 @@ func main() {
 
 	logger.WithField("signal", sig.String()).Info("shutting down")
 
-	// Enqueue final status, let the publisher flush it, then stop the world.
-	// Leftovers spill to the durable spool on cancel (no loss).
+	// Enqueue final status WHILE the publisher is still running, then cancel
+	// so terminal/PTY/reader goroutines unblock promptly. (cancel() first
+	// exits the publisher; a later sendStatus would sit unswept on publishCh.)
 	sendStatus("OFFLINE", "shutdown")
+	cancel()
 	waitPublisherEmpty(5 * time.Second)
 
-	// Cancel all goroutine contexts first
-	cancel()
-
-	// Graceful cleanup in order
+	// Graceful cleanup in order — each step is time-bounded so a stuck broker
+	// or half-open socket cannot prevent process exit.
 	mqttMu.Lock()
 	if mqttClient != nil && mqttClient.IsConnected() {
 		mqttClient.Disconnect(500)

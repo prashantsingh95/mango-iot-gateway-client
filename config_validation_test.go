@@ -110,20 +110,7 @@ func TestDevelopmentAnonymousExplicit(t *testing.T) {
 
 // Test 5: provisioning rejects empty credentials — existing valid not overwritten
 func TestProvisioningRejectsEmpty(t *testing.T) {
-	// Simulate existing valid config (save/restore global to avoid polluting other tests)
-	savedUsername, savedPassword, savedBroker := cfg.MQTT.Username, cfg.MQTT.Password, cfg.MQTT.BrokerURL
-	defer func() {
-		cfg.MQTT.Username, cfg.MQTT.Password, cfg.MQTT.BrokerURL = savedUsername, savedPassword, savedBroker
-	}()
-	cfg.MQTT.Username = "existing-user"
-	cfg.MQTT.Password = "existing-pass"
-	cfg.MQTT.BrokerURL = "mqtts://broker.example.com:8883"
-	origEnv := os.Getenv("GATEWAY_ENV")
-	os.Setenv("GATEWAY_ENV", "production")
-	defer os.Setenv("GATEWAY_ENV", origEnv)
-
 	// Simulate provisioning response with empty username/password in production -> must be rejected
-	// Validate wrapper: production empty must fail, so provisionGateway's check would reject
 	emptyCfg := MQTTConfig{
 		BrokerURL:      "mqtts://broker.example.com:8883",
 		Username:       "",
@@ -137,11 +124,11 @@ func TestProvisioningRejectsEmpty(t *testing.T) {
 	if err := ValidateMQTTConfig(emptyCfg); err == nil {
 		t.Fatalf("provisioning empty must be rejected")
 	}
-	// Ensure existing valid still passes validation (not overwritten)
+	// Existing valid credentials must still pass validation
 	validCfg := MQTTConfig{
-		BrokerURL:      cfg.MQTT.BrokerURL,
-		Username:       cfg.MQTT.Username,
-		Password:       cfg.MQTT.Password,
+		BrokerURL:      "mqtts://broker.example.com:8883",
+		Username:       "existing-user",
+		Password:       "existing-pass",
 		ClientIDPrefix: "gw",
 		KeepAlive:      60,
 		QoS:            1,
@@ -151,6 +138,7 @@ func TestProvisioningRejectsEmpty(t *testing.T) {
 	if err := ValidateMQTTConfig(validCfg); err != nil {
 		t.Fatalf("existing valid must still pass, got %v", err)
 	}
+	// No global cfg.MQTT mutation — all checks use local copies
 }
 
 // Test 6: secret logging — ValidateMQTTConfig error must never contain password

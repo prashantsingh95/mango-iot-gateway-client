@@ -128,26 +128,19 @@ func provisionGateway() {
 						cfg.MQTT.BrokerURL = out.MqttBrokerURL
 						updated = true
 					}
-					if updated {
-						// Encrypt password via secretsManager and rewrite config 0600
-						if secrets != nil {
-							if err := secrets.processConfig(&cfg); err != nil {
-								logger.WithError(err).Error("provisioning: failed to encrypt MQTT password")
-							} else {
-								// processConfig already rewrote config with ENC, but we also need to write non-password fields
-								// Ensure config file 0600 with updated broker/username
-								if data, err := yaml.Marshal(&cfg); err == nil {
-									_ = os.WriteFile(configPath(), data, 0600)
-								}
-							}
-						} else {
-							if data, err := yaml.Marshal(&cfg); err == nil {
-								_ = os.WriteFile(configPath(), data, 0600)
-							}
+				if updated {
+					if secrets != nil {
+						if err := secrets.processConfig(&cfg); err != nil {
+							logger.WithError(err).Error("provisioning: failed to encrypt MQTT password")
 						}
-						stampConfigRevision()
-						logger.Info("provisioning: MQTT credentials persisted (0600, encrypted)")
+					} else {
+						if data, err := yaml.Marshal(&cfg); err == nil {
+							_ = os.WriteFile(configPath(), data, 0600)
+						}
 					}
+					stampConfigRevision()
+					logger.Info("provisioning: MQTT credentials persisted (0600, encrypted)")
+				}
 				}
 			}
 		}

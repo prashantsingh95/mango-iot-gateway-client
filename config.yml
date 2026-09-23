@@ -12,6 +12,7 @@ gateway:
   tenant_id: "default"
   provision_token: ""              # Set for auto-registration
   platform_url: ""                 # e.g. https://platform.example.com
+  offline_path: ""                 # Override offline storage base path (default /data/offline on Linux, config dir otherwise)
 
 # White-label / OEM identity (SaaS white-label). Same binary, tenant-driven
 # branding delivered via provisioning. Never change tenant binding locally —

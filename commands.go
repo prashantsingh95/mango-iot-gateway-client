@@ -42,6 +42,7 @@ type CommandResponse struct {
 var (
 	seenCommands   = make(map[string]time.Time)
 	seenCommandsMu = sync.Mutex{}
+	commandSem     = make(chan struct{}, 4)
 )
 
 func isDuplicateCommand(id string) bool {
@@ -139,7 +140,7 @@ func handleCommand(client MQTT.Client, msg MQTT.Message) {
 	// execution (run_shell up to 30s, firmware downloads). Validation above is
 	// synchronous and fast; dedup marks the ID before dispatch so a redelivery
 	// racing execution still ACKs as duplicate instead of double-running.
-	var commandSem = make(chan struct{}, 4)
+	// (commandSem is package-level for real concurrency control — see §13.)
 
 	logger.WithFields(logrus.Fields{"id": cmd.ID, "type": cmd.Type}).Info("received command")
 

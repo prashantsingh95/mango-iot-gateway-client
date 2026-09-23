@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
-	"time"
 )
 
 // ---------- HTTP Health Server ----------
@@ -43,7 +42,7 @@ func (hs *healthServer) healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":  "ok",
-		"uptime":  int64(time.Since(startTime).Seconds()),
+		"uptime":  systemUptimeSeconds(),
 		"version": version,
 	})
 }

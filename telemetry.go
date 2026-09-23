@@ -27,6 +27,7 @@ type TelemetryData struct {
 	Signal      float64                `json:"signal,omitempty"`
 	Voltage     float64                `json:"voltage,omitempty"`
 	Battery     float64                `json:"battery,omitempty"`
+	Uptime      int64                  `json:"uptime,omitempty"`
 	System      map[string]interface{} `json:"system,omitempty"`
 	Modbus      []ModbusValue          `json:"modbus,omitempty"`
 	GPIO        map[string]interface{} `json:"gpio,omitempty"`
@@ -60,6 +61,7 @@ func collectSystemMetrics() map[string]interface{} {
 
 	if cfg.Monitoring.CPU {
 		if p, err := psCPU.Percent(0, false); err == nil && len(p) > 0 {
+			// gopsutil returns percent (0-100); round to 2 decimals.
 			metrics["cpu_percent"] = math.Round(p[0]*100) / 100
 		}
 		if l, err := psLoad.Avg(); err == nil {
@@ -111,7 +113,7 @@ func collectSystemMetrics() map[string]interface{} {
 			metrics["network_rx_bytes"] = io[0].BytesRecv
 			metrics["network_tx_bytes"] = io[0].BytesSent
 		}
-		metrics["uptime_seconds"] = int64(time.Since(startTime).Seconds())
+		metrics["uptime_seconds"] = systemUptimeSeconds()
 		if signal := getWiFiSignal(); signal != 0 {
 			metrics["signal_dbm"] = signal
 		}
@@ -124,6 +126,22 @@ func collectSystemMetrics() map[string]interface{} {
 	}
 
 	return metrics
+}
+
+// systemUptimeSeconds returns OS uptime from /proc/uptime (falls back to
+// process uptime when the host is not Linux or /proc is unavailable).
+// The UI expects device uptime, not "seconds since agent start".
+func systemUptimeSeconds() int64 {
+	data, err := os.ReadFile("/proc/uptime")
+	if err == nil {
+		fields := strings.Fields(string(data))
+		if len(fields) > 0 {
+			if secs, err := strconv.ParseFloat(fields[0], 64); err == nil && secs >= 0 {
+				return int64(secs)
+			}
+		}
+	}
+	return int64(time.Since(startTime).Seconds())
 }
 
 func getCPUTemperature() float64 {
@@ -198,11 +216,30 @@ func runTelemetryLoop(ctx context.Context) {
 			}
 
 			sys := collectSystemMetrics()
-			// Storage monitoring §37: gateway data includes SD card health
+			// Storage monitoring §37: gateway data includes SD card health.
+			// Must never block the publish path — a stuck SQLite query here
+			// used to freeze the telemetry loop before enqueuePublish.
 			if offlineStorage != nil {
-				sys["storage"] = offlineStorage.GetStorageInfo()
+				storageCh := make(chan map[string]interface{}, 1)
+				go func() {
+					defer func() {
+						if r := recover(); r != nil {
+							storageCh <- nil
+						}
+					}()
+					storageCh <- offlineStorage.GetStorageInfo()
+				}()
+				select {
+				case storage := <-storageCh:
+					if storage != nil {
+						sys["storage"] = storage
+					}
+				case <-time.After(2 * time.Second):
+					// skip storage block; still publish CPU/RAM/etc
+				}
 			}
 			telemetry.System = sys
+			telemetry.Uptime = systemUptimeSeconds()
 
 			if v, ok := sys["cpu_percent"].(float64); ok {
 				telemetry.CPU = v
@@ -279,7 +316,7 @@ func sendStatus(status string, reason ...string) {
 		DeviceID:       getDeviceID(),
 		Status:         status,
 		Reason:         r,
-		Uptime:         int64(time.Since(startTime).Seconds()),
+		Uptime:         systemUptimeSeconds(),
 		Version:        version,
 		IP:             getIPAddress(),
 		LastSeen:       time.Now().UTC().Format(time.RFC3339),

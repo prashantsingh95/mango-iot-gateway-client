@@ -39,14 +39,18 @@ type terminalAgent struct {
 	key  []byte
 	seq  int64
 	conn *websocket.Conn
+	ctx  context.Context
 
 	mu          sync.Mutex
+	writeMu     sync.Mutex
 	connected   bool
+	ready       bool
 	lastSeq     int64
 	sessions    map[string]*ptySession
 	uploads     map[string]*os.File
 	uploadBytes map[string]int64
 	pingStart   int64
+	connGen     int64
 }
 
 func startTerminalAgent(ctx context.Context) {
@@ -56,7 +60,16 @@ func startTerminalAgent(ctx context.Context) {
 		sessions:    make(map[string]*ptySession),
 		uploads:     make(map[string]*os.File),
 		uploadBytes: make(map[string]int64),
+		ctx:         ctx,
 	}
+
+	// Unblock readLoop/WriteMessage as soon as the process is shutting down.
+	// Without this, cancel() alone leaves the agent stuck in a blocking
+	// ReadMessage and SIGTERM never completes within TimeoutStopSec.
+	go func() {
+		<-ctx.Done()
+		agent.closeAll()
+	}()
 
 	backoff := time.Duration(cfg.Terminal.ReconnectBaseMs) * time.Millisecond
 	if backoff <= 0 {
@@ -119,12 +132,23 @@ func (a *terminalAgent) connect(ctx context.Context) error {
 
 	logger.WithField("url", a.wsURL()).Info("terminal agent: connected to backend")
 
+	a.mu.Lock()
+	a.connGen++
+	gen := a.connGen
+	a.mu.Unlock()
+
 	// read loop until closed
 	readErr := a.readLoop(ctx)
 
 	a.mu.Lock()
-	a.connected = false
-	a.conn = nil
+	if a.connGen == gen {
+		a.connected = false
+		a.ready = false
+		if a.conn != nil {
+			_ = a.conn.Close()
+			a.conn = nil
+		}
+	}
 	a.mu.Unlock()
 	return readErr
 }
@@ -198,18 +222,20 @@ func (a *terminalAgent) handleEvent(data string) {
 		a.onBackendMessage(&msg)
 	case "ready":
 		logger.Info("terminal agent: backend accepted connection")
+		a.onReady()
 	case "error":
 		logger.WithField("detail", string(arr[1])).Warn("terminal agent: backend error")
 	}
 }
 
-func (a *terminalAgent) onConnected() {
+// onReady runs after NestJS finished async agent auth (handleConnection).
+// AGENT_HELLO/heartbeats sent earlier were dropped or raced the auth path.
+func (a *terminalAgent) onReady() {
 	a.mu.Lock()
-	a.connected = true
-	a.lastSeq = 0
+	a.ready = true
+	gen := a.connGen
 	a.mu.Unlock()
 
-	// AGENT_HELLO
 	a.sendMessage(msgAgentHello, map[string]interface{}{
 		"agentVersion": version,
 		"capabilities": []string{"terminal", "file-transfer"},
@@ -217,21 +243,28 @@ func (a *terminalAgent) onConnected() {
 		"arch":         runtimeGOARCH(),
 		"hostname":     hostname(),
 	}, "")
-
-	// heartbeat
-	go a.heartbeatLoop()
+	go a.heartbeatLoop(gen)
 	logger.Info("terminal agent: session established with backend")
 }
 
-func (a *terminalAgent) heartbeatLoop() {
+func (a *terminalAgent) onConnected() {
+	a.mu.Lock()
+	a.connected = true
+	a.ready = false
+	a.lastSeq = 0
+	a.mu.Unlock()
+	// Wait for backend 'ready' (auth complete) before AGENT_HELLO/heartbeat.
+	logger.Info("terminal agent: namespace connected, waiting for backend ready")
+}
+
+func (a *terminalAgent) heartbeatLoop(gen int64) {
 	ticker := time.NewTicker(time.Duration(cfg.Terminal.HeartbeatMs) * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		a.mu.Lock()
-		connected := a.connected
-		conn := a.conn
+		alive := a.connected && a.conn != nil && a.connGen == gen
 		a.mu.Unlock()
-		if !connected || conn == nil {
+		if !alive {
 			return
 		}
 		a.pingStart = time.Now().UnixMilli()
@@ -314,6 +347,25 @@ func (a *terminalAgent) handleSessionStart(msg *TerminalMessage) {
 	cols, _ := toUint16(p["cols"], 80)
 	rows, _ := toUint16(p["rows"], 24)
 
+	// Prefer an absolute cwd from the backend; otherwise start in /home (or ~)
+	// so the prompt is not the agent's systemd WorkingDirectory (often /).
+	startDir := ""
+	if s, ok := p["cwd"].(string); ok {
+		startDir = s
+	}
+	if startDir == "" || !filepath.IsAbs(startDir) {
+		if st, err := os.Stat("/home"); err == nil && st.IsDir() {
+			startDir = "/home"
+		} else if home, err := os.UserHomeDir(); err == nil && home != "" {
+			startDir = home
+		} else {
+			startDir = "/"
+		}
+	}
+	if st, err := os.Stat(startDir); err != nil || !st.IsDir() {
+		startDir = "/"
+	}
+
 	// Phase 5 — concurrent session cap (fail closed, audited).
 	a.mu.Lock()
 	if len(a.sessions) >= a.maxSessions() {
@@ -324,6 +376,7 @@ func (a *terminalAgent) handleSessionStart(msg *TerminalMessage) {
 	a.mu.Unlock()
 
 	cmd := exec.Command(shell)
+	cmd.Dir = startDir
 	f, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: rows, Cols: cols})
 	if err != nil {
 		a.sendMessage(msgError, map[string]interface{}{"message": err.Error()}, sessionID)
@@ -339,9 +392,14 @@ func (a *terminalAgent) handleSessionStart(msg *TerminalMessage) {
 	go a.reapSession(sessionID)
 
 	// pump PTY output -> backend
-	go func() {
+	go func(ctx context.Context) {
 		buf := make([]byte, 4096)
 		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
 			n, err := f.Read(buf)
 			if n > 0 {
 				a.sendMessage(msgSessionOutput, map[string]interface{}{
@@ -356,7 +414,7 @@ func (a *terminalAgent) handleSessionStart(msg *TerminalMessage) {
 		a.mu.Lock()
 		delete(a.sessions, sessionID)
 		a.mu.Unlock()
-	}()
+	}(a.ctx)
 
 	go func() {
 		_ = cmd.Wait()
@@ -644,7 +702,7 @@ func (a *terminalAgent) sendConnect() {
 
 func (a *terminalAgent) sendMessage(msgType string, payload map[string]interface{}, sessionID string) {
 	a.mu.Lock()
-	if !a.connected || a.conn == nil {
+	if !a.connected || !a.ready || a.conn == nil {
 		a.mu.Unlock()
 		return
 	}
@@ -686,16 +744,30 @@ func (a *terminalAgent) gatewayID() string {
 }
 
 func (a *terminalAgent) writeFrame(frame string) {
+	// Hold the write lock for the whole WriteMessage so engine.io pings,
+	// heartbeats and session output never interleave on the socket
+	// (concurrent gorilla/websocket writes can corrupt frames → close 1005).
+	a.writeMu.Lock()
+	defer a.writeMu.Unlock()
+
 	a.mu.Lock()
 	conn := a.conn
 	a.mu.Unlock()
 	if conn == nil {
 		return
 	}
+	// Bounded write: a half-open TCP peer must never pin writeMu forever
+	// (that blocked SIGTERM shutdown past systemd's TimeoutStopSec).
+	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	_ = conn.WriteMessage(websocket.TextMessage, []byte(frame))
 }
 
 func (a *terminalAgent) closeAll() {
+	// Same lock order as writeFrame (writeMu → mu) so shutdown can interrupt
+	// a blocked WriteMessage without deadlocking against the write path.
+	a.writeMu.Lock()
+	defer a.writeMu.Unlock()
+
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for id, s := range a.sessions {
@@ -714,6 +786,7 @@ func (a *terminalAgent) closeAll() {
 		a.conn = nil
 	}
 	a.connected = false
+	a.ready = false
 }
 
 // ---------- helpers ----------
