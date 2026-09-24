@@ -92,7 +92,10 @@ func wifiAPStatusCommand() CommandResponse {
 	status := wifiAPStatus{Supported: true, Backend: backend, Interface: wifiAPInterface()}
 	if backend == "networkmanager" {
 		name := cfg.WifiAP.Connection
-		args := []string{"-t", "-f", "GENERAL.STATE,GENERAL.CONNECTION,802-11-wireless.ssid", "dev", "show"}
+		// NOTE: `802-11-wireless.ssid` is not a valid `dev show` field on all
+		// NetworkManager versions (fails the whole query with exit status 2).
+		// Query only portable GENERAL fields here; SSID best-effort below.
+		args := []string{"-t", "-f", "GENERAL.STATE,GENERAL.CONNECTION", "dev", "show"}
 		out, err := wifiAPOutput("nmcli", args...)
 		if err != nil {
 			return wifiAPResponse(cmd, nil, fmt.Errorf("nmcli status: %w", err))
@@ -103,11 +106,19 @@ func wifiAPStatusCommand() CommandResponse {
 				status.Enabled = strings.Contains(strings.ToLower(line), "activated")
 			} else if strings.HasPrefix(line, "GENERAL.CONNECTION:") && name == "" {
 				name = strings.TrimSpace(strings.TrimPrefix(line, "GENERAL.CONNECTION:"))
-			} else if strings.HasPrefix(line, "802-11-wireless.ssid:") {
-				status.SSID = strings.TrimSpace(strings.TrimPrefix(line, "802-11-wireless.ssid:"))
 			}
 		}
 		status.Connection = name
+		if name != "" {
+			// Best-effort SSID lookup; never fails the status command.
+			if ssidOut, serr := wifiAPOutput("nmcli", "-t", "-f", "802-11-wireless.ssid", "connection", "show", name); serr == nil {
+				for _, line := range strings.Split(string(ssidOut), "\n") {
+					if strings.HasPrefix(line, "802-11-wireless.ssid:") {
+						status.SSID = strings.TrimSpace(strings.TrimPrefix(line, "802-11-wireless.ssid:"))
+					}
+				}
+			}
+		}
 	} else {
 		status.Enabled = systemdActive("hostapd")
 		status.Connection = "hostapd"
