@@ -146,7 +146,9 @@ func wifiAPClients() ([]wifiAPClient, error) {
 	var current *wifiAPClient
 	for _, line := range strings.Split(string(out), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) == 2 && strings.EqualFold(fields[0], "Station") {
+		// Modern iw prints "Station <mac> (on <iface>)"; older prints
+		// "Station <mac>". Accept both (MAC is always fields[1]).
+		if len(fields) >= 2 && strings.EqualFold(fields[0], "Station") {
 			if current != nil {
 				clients = append(clients, *current)
 			}

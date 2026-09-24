@@ -155,6 +155,7 @@ install_deps() {
   apt-get update -qq
   apt-get install -y -qq curl wget git ca-certificates haveged ntp logrotate jq make gcc
   apt-get install -y -qq mosquitto mosquitto-clients || warn "Mosquitto unavailable — local meter broker will not work until installed"
+  apt-get install -y -qq iw wireless-tools || warn "iw unavailable — AP client list will not work until installed"
 
   apt-get install -y -qq gpio wiringpi i2c-tools 2>/dev/null || \
     warn "GPIO packages unavailable (non-Pi?)"
