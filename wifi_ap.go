@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -31,6 +32,18 @@ type wifiAPStatus struct {
 // wifiAPCmdTimeout bounds every local subprocess call: a wedged nmcli/iw
 // (D-Bus stall) must never occupy a command worker forever.
 const wifiAPCmdTimeout = 15 * time.Second
+
+func applyWifiAPDefaults() {
+	if cfg.WifiAP.Interface == "" {
+		cfg.WifiAP.Interface = "wlan0"
+	}
+	if cfg.WifiAP.Connection == "" {
+		cfg.WifiAP.Connection = "mango-ap"
+	}
+	if cfg.WifiAP.MaxClients <= 0 {
+		cfg.WifiAP.MaxClients = 16
+	}
+}
 
 func wifiAPRun(name string, args ...string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), wifiAPCmdTimeout)
@@ -289,4 +302,114 @@ func wifiAPConfigure(cmd CommandRequest) CommandResponse {
 		return wifiAPResponse(cmd, nil, fmt.Errorf("activate AP: %w", err))
 	}
 	return wifiAPStatusCommandWithID(cmd.ID)
+}
+
+// ---------- HTTP API (localhost :8090) ----------
+
+func registerWifiAPRoutes(mux *http.ServeMux, hs *healthServer) {
+	mux.HandleFunc("/api/wifi_ap/status", hs.wifiAPStatusHandler)
+	mux.HandleFunc("/api/wifi_ap/clients", hs.wifiAPClientsHandler)
+	mux.HandleFunc("/api/wifi_ap/enable", hs.wifiAPEnableHandler)
+	mux.HandleFunc("/api/wifi_ap/disable", hs.wifiAPDisableHandler)
+	mux.HandleFunc("/api/wifi_ap/configure", hs.wifiAPConfigureHandler)
+	mux.HandleFunc("/api/wifi_ap/ping", hs.wifiAPPingHandler)
+}
+
+func (hs *healthServer) wifiAPStatusHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET only"})
+		return
+	}
+	resp := wifiAPStatusCommand()
+	writeJSON(w, http.StatusOK, resp.Result)
+}
+
+func (hs *healthServer) wifiAPClientsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET only"})
+		return
+	}
+	clients, err := wifiAPClients()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"clients": clients})
+}
+
+func (hs *healthServer) wifiAPEnableHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
+		return
+	}
+	if !cfg.WifiAP.Enabled {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "remote Wi-Fi AP management is disabled in gateway configuration"})
+		return
+	}
+	cmd := CommandRequest{ID: "http-wifi-ap-enable", Type: "wifi_ap.enable"}
+	resp := execWifiAP(cmd)
+	writeJSON(w, http.StatusOK, map[string]interface{}{"enabled": resp.Status == "completed", "status": resp.Result})
+}
+
+func (hs *healthServer) wifiAPDisableHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
+		return
+	}
+	if !cfg.WifiAP.Enabled {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "remote Wi-Fi AP management is disabled in gateway configuration"})
+		return
+	}
+	cmd := CommandRequest{ID: "http-wifi-ap-disable", Type: "wifi_ap.disable"}
+	resp := execWifiAP(cmd)
+	writeJSON(w, http.StatusOK, map[string]interface{}{"enabled": false, "status": resp.Result})
+}
+
+func (hs *healthServer) wifiAPConfigureHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
+		return
+	}
+	if !cfg.WifiAP.Enabled {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "remote Wi-Fi AP management is disabled in gateway configuration"})
+		return
+	}
+	var body struct {
+		Connection string `json:"connection"`
+		SSID       string `json:"ssid"`
+		Password   string `json:"password"`
+		Channel    int    `json:"channel"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	cmd := CommandRequest{ID: "http-wifi-ap-configure", Type: "wifi_ap.configure", Payload: mustMarshal(body)}
+	resp := execWifiAP(cmd)
+	if resp.Status == "completed" {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"configured": true, "status": resp.Result})
+	} else {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": resp.Error})
+	}
+}
+
+func (hs *healthServer) wifiAPPingHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
+		return
+	}
+	var body struct {
+		IP string `json:"ip"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || net.ParseIP(body.IP) == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "valid IP required"})
+		return
+	}
+	reachable := pingClient(body.IP)
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ip": body.IP, "reachable": reachable})
+}
+
+func mustMarshal(v interface{}) json.RawMessage {
+	b, _ := json.Marshal(v)
+	return b
 }

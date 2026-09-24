@@ -144,6 +144,7 @@ func main() {
 	// Local MQTT broker + meter client defaults
 	applyLocalMQTTDefaults()
 	applyForwardingDefaults()
+	applyWifiAPDefaults()
 
 	// Offline spool defaults (Phase 5 / §20)
 	if cfg.Queue.MaxEvents <= 0 {

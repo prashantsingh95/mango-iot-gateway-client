@@ -21,6 +21,7 @@ func newHealthServer(addr string) *healthServer {
 	mux.HandleFunc("/ready", hs.readyHandler)
 	registerLocalMQTTRoutes(mux, hs)
 	registerForwardingRoutes(mux, hs)
+	registerWifiAPRoutes(mux, hs)
 	return hs
 }
 
