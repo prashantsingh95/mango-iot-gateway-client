@@ -231,6 +231,8 @@ func execForwarding(cmd CommandRequest) CommandResponse {
 			return CommandResponse{ID: cmd.ID, Status: "rejected", Error: "invalid payload", Timestamp: timeNowRFC3339()}
 		}
 		d := body.Destination
+		// New destinations default to enabled (same as the HTTP API).
+		d.Enabled = true
 		id, err := fwdCreateDestination(&d, body.Password)
 		return mk(map[string]interface{}{"id": id}, err)
 	case "forwarding.update":

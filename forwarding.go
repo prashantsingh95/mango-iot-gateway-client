@@ -632,7 +632,7 @@ func fwdQueueList(status string, limit int) []map[string]interface{} {
 		return nil
 	}
 	defer rows.Close()
-	var out []map[string]interface{}
+	out := []map[string]interface{}{}
 	for rows.Next() {
 		var id, destID, retry int64
 		var msgID, st, name sql.NullString

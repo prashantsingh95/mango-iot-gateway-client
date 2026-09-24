@@ -93,6 +93,9 @@ func forwardingTick() {
 	if fwdDB == nil || !cfg.Forwarding.Enabled {
 		return
 	}
+	// Reap rows orphaned in SENDING by a mid-batch restart (fetch only
+	// takes PENDING/RETRY, so without this they would stick forever).
+	_, _ = fwdDB.Exec(`UPDATE forwarding_queue SET status='PENDING' WHERE status='SENDING' AND created_at<?`, time.Now().Unix()-600)
 	dests, err := fwdListDestinations()
 	if err != nil {
 		fwdLastErr = err.Error()
