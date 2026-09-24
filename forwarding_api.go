@@ -84,9 +84,8 @@ func (hs *healthServer) fwdDestinationsHandler(w http.ResponseWriter, r *http.Re
 			return
 		}
 		d := body.Destination
-		if d.Enabled == false && body.Name != "" {
-			// explicit false respected; default new destinations to enabled
-		}
+		// New destinations default to enabled (disable via PUT/enable API).
+		d.Enabled = true
 		id, err := fwdCreateDestination(&d, body.Password)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})

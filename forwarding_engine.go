@@ -10,10 +10,13 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -210,7 +213,7 @@ func mqttFwdClient(d Destination) (MQTT.Client, error) {
 	opts.SetConnectTimeout(10 * time.Second)
 	opts.SetAutoReconnect(false)
 	if d.TLS {
-		opts.SetTLSConfig(&tls.Config{MinVersion: tls.VersionTLS12})
+		opts.SetTLSConfig(fwdTLSConfig(d))
 	}
 	cli := MQTT.NewClient(opts)
 	tok := cli.Connect()
@@ -242,8 +245,36 @@ func isAuthError(err error) bool {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "not authorized") || strings.Contains(msg, "not authorised") ||
-		strings.Contains(msg, "bad user") || strings.Contains(msg, "auth") && strings.Contains(msg, "fail")
+	// NB: "authority" (x509) contains "auth" — exclude certificate errors.
+	if strings.Contains(msg, "certificate") || strings.Contains(msg, "x509") || strings.Contains(msg, "tls") {
+		return false
+	}
+	return strings.Contains(msg, "not authori") || strings.Contains(msg, "bad user") ||
+		strings.Contains(msg, "auth") && strings.Contains(msg, "fail")
+}
+
+// fwdTLSConfig trusts the destination CA, the on-gateway broker CA for
+// loopback destinations, else system roots. Custom per-destination CA
+// (Destination.CACert PEM) wins when set.
+func fwdTLSConfig(d Destination) *tls.Config {
+	tc := &tls.Config{MinVersion: tls.VersionTLS12}
+	if d.CACert != "" {
+		pool := x509.NewCertPool()
+		if pool.AppendCertsFromPEM([]byte(d.CACert)) {
+			tc.RootCAs = pool
+			return tc
+		}
+	}
+	if d.Host == "127.0.0.1" || d.Host == "localhost" || d.Host == "::1" {
+		caPath := filepath.Join(cfg.LocalBroker.CertDir, "ca.crt")
+		if pemBytes, err := os.ReadFile(caPath); err == nil {
+			pool := x509.NewCertPool()
+			if pool.AppendCertsFromPEM(pemBytes) {
+				tc.RootCAs = pool
+			}
+		}
+	}
+	return tc
 }
 
 func renderFwdTopic(tmpl string, r queueRow) string {

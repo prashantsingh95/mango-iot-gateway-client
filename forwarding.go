@@ -66,6 +66,7 @@ type Destination struct {
 	Password  string `json:"-"` // never serialized
 	Topic     string `json:"topic,omitempty"`
 	QoS       byte   `json:"qos,omitempty"`
+	CACert    string `json:"-"`
 	Framing   string `json:"framing,omitempty"` // json_lines | length_prefix | raw (tcp)
 	AckMode   string `json:"ack_mode,omitempty"` // ack | flush (tcp)
 	Enabled   bool   `json:"enabled"`
@@ -143,6 +144,12 @@ func openForwardingDB() error {
 		if _, err := db.Exec(pragma); err != nil {
 			db.Close()
 			return fmt.Errorf("forwarding pragma: %w", err)
+		}
+	}
+	// Best-effort migration for DBs created before ca_cert existed.
+	if _, err := db.Exec(`ALTER TABLE forwarding_destinations ADD COLUMN ca_cert TEXT`); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column") {
+			logger.WithError(err).Warn("forwarding: ca_cert migration skipped")
 		}
 	}
 	schema := []string{

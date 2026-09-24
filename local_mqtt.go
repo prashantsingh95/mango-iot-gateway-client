@@ -371,8 +371,10 @@ func writeBrokerACL(users []LocalBrokerUser) error {
 	for _, u := range users {
 		sb.WriteString("user " + u.Username + "\n")
 		if u.Username == cfg.LocalClient.Username {
-			sb.WriteString("topic read meter/#\n")
-			sb.WriteString("topic read $SYS/#\n")
+			// Gateway's own service account: full read for ingest/monitoring
+			// plus write for customer forwarding destinations. LAN-only
+			// broker; credentials never leave the gateway.
+			sb.WriteString("topic readwrite #\n")
 		} else {
 			sb.WriteString("topic readwrite meter/" + u.Username + "/#\n")
 		}
