@@ -19,6 +19,7 @@ func newHealthServer(addr string) *healthServer {
 	}
 	mux.HandleFunc("/health", hs.healthHandler)
 	mux.HandleFunc("/ready", hs.readyHandler)
+	registerLocalMQTTRoutes(mux, hs)
 	return hs
 }
 

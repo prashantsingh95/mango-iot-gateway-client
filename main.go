@@ -141,6 +141,9 @@ func main() {
 		cfg.Terminal.ShellAllowlist = []string{cfg.Terminal.Shell}
 	}
 
+	// Local MQTT broker + meter client defaults
+	applyLocalMQTTDefaults()
+
 	// Offline spool defaults (Phase 5 / §20)
 	if cfg.Queue.MaxEvents <= 0 {
 		cfg.Queue.MaxEvents = 20000
@@ -339,6 +342,9 @@ func main() {
 		go startCloudflareTunnel(ctx)
 		logger.Info("cloudflare tunnel: enabled (outbound SSH)")
 	}
+
+	// Local MQTT broker + meter ingest (independent from remote HiveMQ client)
+	startLocalMQTTSupervisor(ctx)
 
 	// Start HTTP health endpoint on localhost:8090
 	healthSrv = newHealthServer("127.0.0.1:8090")

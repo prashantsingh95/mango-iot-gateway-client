@@ -143,6 +143,44 @@ type WifiAPConfig struct {
 	MaxClients    int    `yaml:"max_clients"`
 }
 
+// LocalBrokerUser is one meter/client credential for the on-gateway broker.
+// Passwords are encrypted at rest by the secrets manager (enc:...).
+type LocalBrokerUser struct {
+	Username string `yaml:"username"`
+	Password string `yaml:"password"`
+}
+
+// LocalBrokerConfig controls the on-gateway Mosquitto broker (meters over
+// gateway Wi-Fi/LAN). Independent from the remote HiveMQ client: disabling
+// the local broker never affects gateway telemetry.
+type LocalBrokerConfig struct {
+	Enabled   bool   `yaml:"enabled"`
+	Mode      string `yaml:"mode"` // unsecured|secure|both (disabled when Enabled=false)
+	Bind      string `yaml:"bind"` // meter-facing listen address (default 0.0.0.0 = all LAN/Wi-Fi)
+	PortPlain int    `yaml:"port_unsecured"`
+	PortTLS   int    `yaml:"port_secure"`
+	// AllowAnonymousPlain permits passwordless 1883 (LAN-only). Secure listener
+	// NEVER allows anonymous.
+	AllowAnonymousPlain bool              `yaml:"allow_anonymous_unsecured"`
+	Users               []LocalBrokerUser `yaml:"users"`
+	MaxConnections      int               `yaml:"max_connections"`
+	MaxPayloadBytes     int               `yaml:"max_payload_bytes"`
+	CertDir             string            `yaml:"cert_dir"`  // default <config-dir>/mqtt/certs
+	ConfPath            string            `yaml:"conf_path"` // default <config-dir>/mqtt/mosquitto.conf
+	DataDir             string            `yaml:"data_dir"`  // mosquitto persistence dir
+	Service             string            `yaml:"service"`   // systemd unit (default mosquitto)
+}
+
+// LocalClientConfig controls the on-gateway MQTT client that ingests meter
+// data from the local broker (127.0.0.1), validates it and queues it locally.
+type LocalClientConfig struct {
+	Enabled         bool     `yaml:"enabled"`
+	Username        string   `yaml:"username"` // auto-provisioned into broker passwd
+	Password        string   `yaml:"password"` // enc:... at rest
+	Topics          []string `yaml:"topics"`   // default ["meter/#"]
+	MaxPayloadBytes int      `yaml:"max_payload_bytes"`
+}
+
 // TerminalConfig enables the reverse-connection remote terminal agent.
 // The agent dials OUT to the backend's Socket.IO /agent namespace (no inbound
 // ports). gateway_id defaults to the device id if unset.
@@ -235,6 +273,8 @@ type Config struct {
 	Commands    CommandsConfig         `yaml:"commands"`
 	WifiAP      WifiAPConfig           `yaml:"wifi_ap"`
 	Terminal    TerminalConfig         `yaml:"terminal"`
+	LocalBroker LocalBrokerConfig      `yaml:"local_broker"`
+	LocalClient LocalClientConfig      `yaml:"local_client"`
 }
 
 func configPath() string {

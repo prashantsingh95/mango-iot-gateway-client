@@ -135,6 +135,15 @@ commands:
     - "wifi_ap.enable"
     - "wifi_ap.disable"
     - "wifi_ap.configure"
+    - "mqtt.local.status"
+    - "mqtt.local.enable"
+    - "mqtt.local.disable"
+    - "mqtt.local.restart"
+    - "mqtt.local.config"
+    - "mqtt.local.logs"
+    - "mqtt.local.clients"
+    - "mqtt.local.meters"
+    - "mqtt.local.test"
     - "wifi_ap.clients"
     - "wifi_ap.ping_client"
   shell:
@@ -175,3 +184,26 @@ cloudflare_tunnel:
   max_session_hours: 8             # Absolute session lifetime
   max_sessions: 5                  # Concurrent PTY cap
   insecure_skip_verify: false      # TEST ONLY. Never true in production.
+
+# Local MQTT broker for customer meters over gateway Wi-Fi/LAN (Mosquitto).
+# Independent from the remote HiveMQ client above. Disabled by default —
+# enable from the platform (Devices > Local MQTT) or the agent API.
+local_broker:
+  enabled: false
+  mode: "secure"                   # unsecured|secure|both
+  bind: "0.0.0.0"                  # meter-facing listen address (all LAN/Wi-Fi)
+  port_unsecured: 1883
+  port_secure: 8883
+  allow_anonymous_unsecured: false
+  users: []                        # [{username, password}] — passwords enc: at rest
+  max_connections: 100
+  max_payload_bytes: 65536
+
+# Local meter client: ingests meter/# from 127.0.0.1, validates, queues locally.
+local_client:
+  enabled: true                    # runs whenever the local broker is enabled
+  username: "gateway-local"
+  password: ""                     # auto-provisioned on first enable
+  topics:
+    - "meter/#"
+  max_payload_bytes: 65536

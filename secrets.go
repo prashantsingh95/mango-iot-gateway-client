@@ -93,55 +93,89 @@ func (sm *secretsManager) decrypt(encrypted string) (string, error) {
 	return string(plaintext), nil
 }
 
+// cryptField normalizes one secret field. The in-memory value is ALWAYS
+// plaintext afterwards. It returns the value to persist in the file (enc:)
+// and whether the file needs rewriting. This fixes the old bug where freshly
+// encrypted values were left as ciphertext in memory, so the process ran with
+// enc:... passwords/tokens until the next restart.
+func (sm *secretsManager) cryptField(value *string, fieldName string) (fileValue string, changed bool, err error) {
+	if *value == "" {
+		return "", false, nil
+	}
+	if strings.HasPrefix(*value, "enc:") {
+		dec, derr := sm.decrypt(*value)
+		if derr != nil {
+			return "", false, fmt.Errorf("decrypt %s: %w", fieldName, derr)
+		}
+		*value = dec
+		return "", false, nil
+	}
+	enc, eerr := sm.encrypt(*value)
+	if eerr != nil {
+		return "", false, fmt.Errorf("encrypt %s: %w", fieldName, eerr)
+	}
+	return enc, true, nil
+}
+
 func (sm *secretsManager) processConfig(cfg *Config) error {
 	if sm == nil {
 		return nil
 	}
-	var needsRewrite bool
+	// Collect encrypted file values; cfg itself stays plaintext in memory.
+	type pending struct {
+		apply func(*Config)
+	}
+	var pend []pending
 
-	if cfg.MQTT.Password != "" {
-		if strings.HasPrefix(cfg.MQTT.Password, "enc:") {
-			dec, err := sm.decrypt(cfg.MQTT.Password)
-			if err != nil {
-				return fmt.Errorf("decrypt mqtt password: %w", err)
-			}
-			cfg.MQTT.Password = dec
-		} else {
-			enc, err := sm.encrypt(cfg.MQTT.Password)
-			if err != nil {
-				return fmt.Errorf("encrypt mqtt password: %w", err)
-			}
-			cfg.MQTT.Password = enc
-			needsRewrite = true
+	if v, changed, err := sm.cryptField(&cfg.MQTT.Password, "mqtt password"); err != nil {
+		return err
+	} else if changed {
+		v := v
+		pend = append(pend, pending{apply: func(c *Config) { c.MQTT.Password = v }})
+	}
+
+	if v, changed, err := sm.cryptField(&cfg.Gateway.ProvisionToken, "provision token"); err != nil {
+		return err
+	} else if changed {
+		v := v
+		pend = append(pend, pending{apply: func(c *Config) { c.Gateway.ProvisionToken = v }})
+	}
+
+	for i := range cfg.LocalBroker.Users {
+		if v, changed, err := sm.cryptField(&cfg.LocalBroker.Users[i].Password, "local broker password"); err != nil {
+			return err
+		} else if changed {
+			v, i := v, i
+			pend = append(pend, pending{apply: func(c *Config) { c.LocalBroker.Users[i].Password = v }})
 		}
 	}
 
-	if cfg.Gateway.ProvisionToken != "" {
-		if strings.HasPrefix(cfg.Gateway.ProvisionToken, "enc:") {
-			dec, err := sm.decrypt(cfg.Gateway.ProvisionToken)
-			if err != nil {
-				return fmt.Errorf("decrypt provision token: %w", err)
-			}
-			cfg.Gateway.ProvisionToken = dec
-		} else {
-			enc, err := sm.encrypt(cfg.Gateway.ProvisionToken)
-			if err != nil {
-				return fmt.Errorf("encrypt provision token: %w", err)
-			}
-			cfg.Gateway.ProvisionToken = enc
-			needsRewrite = true
-		}
+	if v, changed, err := sm.cryptField(&cfg.LocalClient.Password, "local client password"); err != nil {
+		return err
+	} else if changed {
+		v := v
+		pend = append(pend, pending{apply: func(c *Config) { c.LocalClient.Password = v }})
 	}
 
-	if needsRewrite {
-		data, err := yaml.Marshal(cfg)
-		if err != nil {
-			return fmt.Errorf("marshal config: %w", err)
-		}
-		if err := os.WriteFile(configPath(), data, 0600); err != nil {
-			return fmt.Errorf("rewrite config: %w", err)
-		}
-		logger.Info("secrets: encrypted plaintext secrets in config file")
+	if len(pend) == 0 {
+		return nil
 	}
+	// Marshal a copy with ciphertext so memory keeps plaintext. Deep-copy the
+	// users slice (it shares backing storage with cfg).
+	fileCfg := *cfg
+	fileUsers := make([]LocalBrokerUser, len(cfg.LocalBroker.Users))
+	copy(fileUsers, cfg.LocalBroker.Users)
+	fileCfg.LocalBroker.Users = fileUsers
+	for _, p := range pend {
+		p.apply(&fileCfg)
+	}
+	data, err := yaml.Marshal(&fileCfg)
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	if err := os.WriteFile(configPath(), data, 0600); err != nil {
+		return fmt.Errorf("rewrite config: %w", err)
+	}
+	logger.Info("secrets: encrypted plaintext secrets in config file")
 	return nil
 }

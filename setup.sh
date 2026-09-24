@@ -39,6 +39,8 @@
 #                       from --platform-url, http→ws / https→wss)
 #   --signing-pepper P  Must equal backend TERMINAL_SIGNING_PEPPER
 #   --terminal-shell S  Shell for remote terminal (default: /bin/bash)
+#   --local-mqtt MODE   Local meter broker: disabled|unsecured|secure|both (default: disabled)
+#   --no-firewall       Skip LAN-only firewall rules for local MQTT ports
 #   --help
 #
 # Environment:
@@ -82,6 +84,8 @@ parse_args() {
       --ws-url) WS_URL="$2"; shift 2 ;;
       --signing-pepper) SIGNING_PEPPER="$2"; shift 2 ;;
       --terminal-shell) TERMINAL_SHELL="$2"; shift 2 ;;
+      --local-mqtt) LOCAL_MQTT_MODE="$2"; shift 2 ;;
+      --no-firewall) NO_FIREWALL=1; shift ;; 
       --help|-h)
         echo "Usage: sudo bash setup.sh [options]"
         echo ""
@@ -97,8 +101,10 @@ parse_args() {
         echo "  --agent-secret SEC  One-time terminal agent secret (enables remote terminal)"
         echo "  --ws-url URL        Backend WS URL (default: derived from --platform-url)"
         echo "  --signing-pepper P  Must match backend TERMINAL_SIGNING_PEPPER"
-        echo "  --terminal-shell S  Shell for remote terminal (default: /bin/bash)"
-        echo "  --help              Show this help"
+  echo "  --terminal-shell S  Shell for remote terminal (default: /bin/bash)"
+  echo "  --local-mqtt MODE   Local meter broker: disabled|unsecured|secure|both"
+  echo "  --no-firewall       Skip LAN-only firewall rules for local MQTT ports"
+  echo "  --help              Show this help"
         echo ""
         echo "One-command example (telemetry + provisioning + terminal):"
         echo "  sudo bash setup.sh \\"
@@ -148,6 +154,7 @@ install_deps() {
   info "Installing system dependencies..."
   apt-get update -qq
   apt-get install -y -qq curl wget git ca-certificates haveged ntp logrotate jq make gcc
+  apt-get install -y -qq mosquitto mosquitto-clients || warn "Mosquitto unavailable — local meter broker will not work until installed"
 
   apt-get install -y -qq gpio wiringpi i2c-tools 2>/dev/null || \
     warn "GPIO packages unavailable (non-Pi?)"
@@ -331,6 +338,21 @@ commands:
     - "update_firmware"
     - "set_relay"
     - "read_register"
+    - "wifi_ap.status"
+    - "wifi_ap.enable"
+    - "wifi_ap.disable"
+    - "wifi_ap.configure"
+    - "wifi_ap.clients"
+    - "wifi_ap.ping_client"
+    - "mqtt.local.status"
+    - "mqtt.local.enable"
+    - "mqtt.local.disable"
+    - "mqtt.local.restart"
+    - "mqtt.local.config"
+    - "mqtt.local.logs"
+    - "mqtt.local.clients"
+    - "mqtt.local.meters"
+    - "mqtt.local.test"
   shell:
     allowed_paths:
       - "/opt/gateway/scripts/"
@@ -382,6 +404,48 @@ YAML
   else
     info "Remote terminal: disabled (pass --agent-secret to enable in one command)"
   fi
+
+  # ── Local MQTT broker for customer meters (Mosquitto, managed by agent) ──
+  # Disabled by default; enable later from platform Devices > Local MQTT or
+  # pass --local-mqtt secure|unsecured|both. Agent brings it up on boot.
+  LOCAL_MQTT_MODE="${LOCAL_MQTT_MODE:-disabled}"
+  case "$LOCAL_MQTT_MODE" in
+    disabled|unsecured|secure|both) ;;
+    *) err "--local-mqtt must be disabled|unsecured|secure|both" ;;
+  esac
+  if [[ "$LOCAL_MQTT_MODE" == "disabled" ]]; then
+    LOCAL_BROKER_ENABLED="false"; LOCAL_BROKER_MODE="secure"
+  else
+    LOCAL_BROKER_ENABLED="true"; LOCAL_BROKER_MODE="$LOCAL_MQTT_MODE"
+  fi
+  if grep -q -e '^local_broker:' -e '^local_client:' /opt/gateway/config.yml; then
+    awk '/^local_broker:/{skip=1; next} /^local_client:/{skip=1; next} /^[A-Za-z_]+:/{skip=0} !skip' \
+      /opt/gateway/config.yml > /opt/gateway/config.yml.new \
+      && mv /opt/gateway/config.yml.new /opt/gateway/config.yml
+  fi
+  cat >> /opt/gateway/config.yml << YAML
+
+# Local MQTT broker for customer meters (Mosquitto). Independent from remote HiveMQ.
+local_broker:
+  enabled: ${LOCAL_BROKER_ENABLED}
+  mode: "${LOCAL_BROKER_MODE}"
+  bind: "0.0.0.0"
+  port_unsecured: 1883
+  port_secure: 8883
+  allow_anonymous_unsecured: false
+  users: []
+  max_connections: 100
+  max_payload_bytes: 65536
+
+local_client:
+  enabled: true
+  username: "gateway-local"
+  password: ""
+  topics:
+    - "meter/#"
+  max_payload_bytes: 65536
+YAML
+  log "Local MQTT broker: ${LOCAL_BROKER_ENABLED} (mode: ${LOCAL_BROKER_MODE})"
 
   # Example custom script
   mkdir -p /opt/gateway/scripts
@@ -436,6 +500,94 @@ LOG
   systemctl daemon-reload
   systemctl enable gateway-agent
   log "Service installed"
+}
+
+# ============================================================================
+# Stage 4b — Local MQTT broker (Mosquitto for customer meters)
+# ============================================================================
+install_mosquitto() {
+  command -v mosquitto &>/dev/null || { warn "mosquitto missing — skipping local broker setup"; return 0; }
+  local MOSQ
+  MOSQ="$(command -v mosquitto)"
+
+  mkdir -p /opt/gateway/mqtt
+  chown -R gateway:gateway /opt/gateway/mqtt
+
+  # Dedicated unit (agent-managed conf). NOT enabled at boot by default: the
+  # gateway agent starts it when local_broker.enabled=true (sudo drop-in below).
+  cat > /etc/systemd/system/mango-local-broker.service << UNIT
+[Unit]
+Description=Mango Local MQTT Broker (meters, agent-managed)
+After=network-online.target gateway-agent.service
+Wants=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=gateway
+Group=gateway
+ExecStart=${MOSQ} -c /opt/gateway/mqtt/mosquitto.conf
+ExecReload=/bin/kill -HUP \$MAINPID
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl daemon-reload
+  log "Local broker unit installed (mango-local-broker, starts on agent enable)"
+
+  # Scoped passwordless sudo so the unprivileged agent can control ONLY this unit
+  local SYSCTL; SYSCTL="$(command -v systemctl)"
+  cat > /etc/sudoers.d/gateway-mosquitto << SUDO
+gateway ALL=(root) NOPASSWD: ${SYSCTL} start mango-local-broker, ${SYSCTL} stop mango-local-broker, ${SYSCTL} restart mango-local-broker, ${SYSCTL} is-active mango-local-broker, ${SYSCTL} status mango-local-broker
+SUDO
+  chmod 440 /etc/sudoers.d/gateway-mosquitto
+  visudo -c -q 2>/dev/null || { warn "sudoers check failed — agent broker control may need manual sudo"; rm -f /etc/sudoers.d/gateway-mosquitto; }
+  usermod -a -G systemd-journal gateway 2>/dev/null || true
+  log "Agent broker control granted (scoped sudo)"
+
+  if [[ -z "${NO_FIREWALL:-}" ]]; then
+    configure_mqtt_firewall
+  else
+    info "Firewall rules skipped (--no-firewall)"
+  fi
+}
+
+# LAN-only MQTT: allow 1883/8883 from private subnets, drop everything else
+# (WAN/Internet). Outbound traffic (HiveMQ) is unaffected.
+configure_mqtt_firewall() {
+  local SUBNETS
+  SUBNETS="$(ip -o -f inet addr show 2>/dev/null | awk '{print $4}' | grep -E '^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.)' | sort -u)"
+  [[ -z "$SUBNETS" ]] && { warn "No LAN subnet detected — skipping MQTT firewall"; return 0; }
+
+  if command -v ufw &>/dev/null; then
+    for net in $SUBNETS; do
+      ufw allow from "$net" to any port 1883 proto tcp >> "$LOGFILE" 2>&1 || true
+      ufw allow from "$net" to any port 8883 proto tcp >> "$LOGFILE" 2>&1 || true
+    done
+    ufw deny 1883/tcp >> "$LOGFILE" 2>&1 || true
+    ufw deny 8883/tcp >> "$LOGFILE" 2>&1 || true
+    log "Firewall (ufw): 1883/8883 LAN-only"
+  elif command -v iptables &>/dev/null; then
+    # Loopback FIRST: the on-gateway meter client and health probes use 127.0.0.1
+    iptables -C INPUT -i lo -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -i lo -j ACCEPT
+    for net in $SUBNETS; do
+      iptables -C INPUT -p tcp --dport 1883 -s "$net" -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport 1883 -s "$net" -j ACCEPT
+      iptables -C INPUT -p tcp --dport 8883 -s "$net" -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport 8883 -s "$net" -j ACCEPT
+    done
+    iptables -C INPUT -p tcp --dport 1883 -j DROP 2>/dev/null || iptables -A INPUT -p tcp --dport 1883 -j DROP
+    iptables -C INPUT -p tcp --dport 8883 -j DROP 2>/dev/null || iptables -A INPUT -p tcp --dport 8883 -j DROP
+    if command -v netfilter-persistent &>/dev/null; then
+      netfilter-persistent save >> "$LOGFILE" 2>&1 || true
+    else
+      warn "iptables rules applied but not persistent (install iptables-persistent)"
+    fi
+    log "Firewall (iptables): 1883/8883 LAN-only"
+  else
+    warn "No ufw/iptables — MQTT ports unrestricted; restrict 1883/8883 to LAN manually"
+  fi
 }
 
 # ============================================================================
@@ -495,6 +647,7 @@ main() {
   install_binary
   configure
   install_service
+  install_mosquitto
   start_agent
 }
 
