@@ -143,6 +143,7 @@ func main() {
 
 	// Local MQTT broker + meter client defaults
 	applyLocalMQTTDefaults()
+	applyForwardingDefaults()
 
 	// Offline spool defaults (Phase 5 / §20)
 	if cfg.Queue.MaxEvents <= 0 {
@@ -345,6 +346,9 @@ func main() {
 
 	// Local MQTT broker + meter ingest (independent from remote HiveMQ client)
 	startLocalMQTTSupervisor(ctx)
+
+	// Customer forwarding engine (SQLite store-and-forward to customer MQTT/TCP)
+	startForwardingEngine(ctx)
 
 	// Start HTTP health endpoint on localhost:8090
 	healthSrv = newHealthServer("127.0.0.1:8090")

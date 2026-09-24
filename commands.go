@@ -179,6 +179,8 @@ func handleCommand(client MQTT.Client, msg MQTT.Message) {
 			resp = execWifiAP(cmd)
 		case "mqtt.local.status", "mqtt.local.enable", "mqtt.local.disable", "mqtt.local.restart", "mqtt.local.config", "mqtt.local.logs", "mqtt.local.clients", "mqtt.local.meters", "mqtt.local.test":
 			resp = execLocalMQTT(cmd)
+		case "forwarding.status", "forwarding.destinations", "forwarding.create", "forwarding.update", "forwarding.delete", "forwarding.test", "forwarding.queue":
+			resp = execForwarding(cmd)
 		default:
 			resp.Status = "rejected"
 			resp.Error = fmt.Sprintf("unknown command type: %s", cmd.Type)

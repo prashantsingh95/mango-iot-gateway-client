@@ -162,6 +162,17 @@ install_deps() {
 
   raspi-config nonint do_i2c 0 2>/dev/null || true
   raspi-config nonint do_spi 0 2>/dev/null || true
+
+  # Disable Wi-Fi power save (NetworkManager): power-save causes sustained
+  # SSH/scp transfers to stall and drop on Pi clients. Immediate + persistent.
+  if command -v nmcli &>/dev/null; then
+    mkdir -p /etc/NetworkManager/conf.d
+    printf '[connection]\nwifi.powersave = 2\n' > /etc/NetworkManager/conf.d/powersave.conf
+    for iface in $(ls /sys/class/net/ 2>/dev/null | grep -E '^(wlan|wl)'); do
+      iw dev "$iface" set power_save off 2>/dev/null || true
+    done
+    log "Wi-Fi power save disabled (link stability)"
+  fi
 }
 
 # ============================================================================
@@ -354,6 +365,13 @@ commands:
     - "mqtt.local.clients"
     - "mqtt.local.meters"
     - "mqtt.local.test"
+    - "forwarding.status"
+    - "forwarding.destinations"
+    - "forwarding.create"
+    - "forwarding.update"
+    - "forwarding.delete"
+    - "forwarding.test"
+    - "forwarding.queue"
   shell:
     allowed_paths:
       - "/opt/gateway/scripts/"
@@ -445,6 +463,14 @@ local_client:
   topics:
     - "meter/#"
   max_payload_bytes: 65536
+
+forwarding:
+  enabled: true
+  batch_size: 100
+  poll_interval_sec: 5
+  telemetry_retention_days: 30
+  sent_retention_days: 7
+  max_db_mb: 512
 YAML
   log "Local MQTT broker: ${LOCAL_BROKER_ENABLED} (mode: ${LOCAL_BROKER_MODE})"
 

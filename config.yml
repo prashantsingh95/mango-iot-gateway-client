@@ -144,6 +144,13 @@ commands:
     - "mqtt.local.clients"
     - "mqtt.local.meters"
     - "mqtt.local.test"
+    - "forwarding.status"
+    - "forwarding.destinations"
+    - "forwarding.create"
+    - "forwarding.update"
+    - "forwarding.delete"
+    - "forwarding.test"
+    - "forwarding.queue"
     - "wifi_ap.clients"
     - "wifi_ap.ping_client"
   shell:
@@ -207,3 +214,13 @@ local_client:
   topics:
     - "meter/#"
   max_payload_bytes: 65536
+
+# Customer forwarding: SQLite store-and-forward of meter data to customer
+# MQTT/TCP destinations. Independent from the remote HiveMQ telemetry path.
+forwarding:
+  enabled: true
+  batch_size: 100
+  poll_interval_sec: 5
+  telemetry_retention_days: 30
+  sent_retention_days: 7
+  max_db_mb: 512

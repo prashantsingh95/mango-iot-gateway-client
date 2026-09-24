@@ -254,6 +254,17 @@ func handleMeterMessage(_ MQTT.Client, msg MQTT.Message) {
 		}
 	}
 
+	// Customer forwarding pipeline: devices + telemetry + per-destination
+	// queue rows in one SQLite transaction (independent from HiveMQ path).
+	if fwdDB != nil && cfg.Forwarding.Enabled {
+		raw, _ := json.Marshal(reading.Data)
+		if ts, err := time.Parse(time.RFC3339, reading.Timestamp); err == nil {
+			if _, qerr := forwardingIngest(meterID, topic, raw, ts); qerr != nil {
+				logger.WithError(qerr).Warn("local meter client: forwarding ingest failed")
+			}
+		}
+	}
+
 	mStats.mu.Lock()
 	mStats.accepted++
 	mi, ok := mStats.meters[meterID]

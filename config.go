@@ -275,6 +275,7 @@ type Config struct {
 	Terminal    TerminalConfig         `yaml:"terminal"`
 	LocalBroker LocalBrokerConfig      `yaml:"local_broker"`
 	LocalClient LocalClientConfig      `yaml:"local_client"`
+	Forwarding  ForwardingConfig       `yaml:"forwarding"`
 }
 
 func configPath() string {
