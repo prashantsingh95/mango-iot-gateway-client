@@ -459,15 +459,22 @@ setup_4g() {
   # Install 4G auto-setup script if available
   if [[ -f "$INSTALL_DIR/setup-4g-auto.sh" ]]; then
     log "Running 4G auto-setup script..."
-    bash "$INSTALL_DIR/setup-4g-auto.sh" --apn "${APN:-auto}" || warn "4G setup had issues (non-fatal)"
+    apn_arg=()
+    if [[ -n "${APN:-}" && "${APN}" != "auto" ]]; then
+      apn_arg=(--apn "$APN")
+    fi
+    bash "$INSTALL_DIR/setup-4g-auto.sh" "${apn_arg[@]}" || warn "4G setup had issues (non-fatal)"
   else
     warn "4G setup script not found at $INSTALL_DIR/setup-4g-auto.sh — skipping"
   fi
   
-  # Ensure ModemManager is running
+  # Ensure ModemManager and fix-4g auto-start are enabled
   systemctl enable --now ModemManager 2>/dev/null || warn "ModemManager not available"
+  systemctl enable --now NetworkManager 2>/dev/null || true
+  systemctl is-enabled fix-4g.service 2>/dev/null | grep -q enabled || warn "fix-4g.service not enabled — will be on next setup-4g-auto run"
   
   log "4G setup attempted (check logs if issues)"
+  log "Post-reboot check: systemctl is-enabled fix-4g ModemManager NetworkManager; nmcli c show airtel | grep autoconnect"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -39,6 +39,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+[[ "$APN" == "auto" ]] && APN="airtelgprs.com"
 [[ $EUID -eq 0 ]] || { echo "Run with sudo: sudo bash $0"; exit 1; }
 [[ $CHECK_ONLY -eq 1 ]] && {
   echo "=== CHECK ONLY ==="
@@ -136,6 +137,71 @@ sleep 8
 nmcli device status 2>&1 || true
 ip -4 addr show ppp0 2>&1 | head -n 20 || true
 ip route 2>&1 | head -n 20 || true
+
+echo "=== 5b/6 Enable auto-start on boot (ModemManager/NetworkManager + fix-4g service) ==="
+sudo systemctl enable ModemManager 2>&1 || true
+sudo systemctl enable NetworkManager 2>&1 || true
+# Helper script for boot-time recovery (modem may enumerate late after reboot)
+sudo tee /usr/local/bin/fix-4g.sh >/dev/null <<'FIX4G_EOF'
+#!/bin/bash
+set -e
+# Fix 4G after reboot — waits for modem, ensures SIMDET and NM connection up
+CONN="airtel"
+IFACE="ttyUSB2"
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  # Power hat early (if raspi-gpio exists)
+  raspi-gpio set 20 op dh 2>/dev/null || true
+  raspi-gpio set 21 op dh 2>/dev/null || true
+  if ls /dev/ttyUSB2 >/dev/null 2>&1; then break; fi
+  echo "[fix-4g] waiting for $IFACE ... $i"
+  sleep 3
+done
+# Wait for ModemManager to see modem (up to 40s)
+for i in $(seq 1 20); do
+  mmcli -L 2>&1 | grep -q "Modem" && break
+  sleep 2
+done
+# If SIM missing (2,0), try to fix; ignore errors (modem may be locked)
+if [ -e /dev/ttyUSB2 ]; then
+  systemctl stop ModemManager 2>/dev/null || true; sleep 2
+  timeout 4 bash -c 'stty -F /dev/ttyUSB2 115200 raw -echo 2>/dev/null; printf "AT#SIMDET=1\r" > /dev/ttyUSB2; sleep 1; cat /dev/ttyUSB2' 2>/dev/null | tr -d '\0' | grep -q "OK" || true
+  systemctl start ModemManager 2>/dev/null || true; sleep 10
+fi
+# Bring up NM connection with retries (modem may still registering)
+for i in 1 2 3 4 5; do
+  if nmcli -t -f NAME connection show --active 2>&1 | grep -q "^${CONN}$"; then
+    echo "[fix-4g] $CONN already active"
+    break
+  fi
+  echo "[fix-4g] nmcli up $CONN attempt $i"
+  nmcli connection up "$CONN" 2>&1 && break || sleep 5
+done
+# Verify
+ip route 2>&1 | grep -q "ppp0" && echo "[fix-4g] OK $(ip -4 addr show ppp0 2>&1 | grep -oP 'inet \K[0-9.]+' || true)" || echo "[fix-4g] WARN ppp0 not up"
+mmcli -m 0 2>&1 | grep -E "state|signal|operator" | head -n 5 || true
+FIX4G_EOF
+sudo chmod +x /usr/local/bin/fix-4g.sh
+sudo tee /etc/systemd/system/fix-4g.service >/dev/null <<'FIXSVC_EOF'
+[Unit]
+Description=Fix 4G connectivity after boot (Telit LE910C4)
+After=ModemManager.service NetworkManager.service
+Wants=ModemManager.service NetworkManager.service
+Before=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/fix-4g.sh
+RemainAfterExit=yes
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target
+FIXSVC_EOF
+sudo systemctl daemon-reload 2>&1 || true
+sudo systemctl enable fix-4g.service 2>&1 || true
+echo "fix-4g.service enabled: $(systemctl is-enabled fix-4g.service 2>&1)"
+ls -l /usr/local/bin/fix-4g.sh /etc/systemd/system/fix-4g.service 2>&1 || true
 
 echo "=== 6/6 Verify ==="
 mmcli -m 0 2>&1 | grep -E "state|signal|operator" | head -n 20 || true
