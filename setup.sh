@@ -456,8 +456,10 @@ YAML
   else
     LOCAL_BROKER_ENABLED="true"; LOCAL_BROKER_MODE="$LOCAL_MQTT_MODE"
   fi
-  if grep -q -e '^local_broker:' -e '^local_client:' /opt/gateway/config.yml; then
-    awk '/^local_broker:/{skip=1; next} /^local_client:/{skip=1; next} /^[A-Za-z_]+:/{skip=0} !skip' \
+  if grep -q -e '^local_broker:' -e '^local_client:' -e '^forwarding:' /opt/gateway/config.yml; then
+    # The heredoc below re-declares all three blocks — strip the template's
+    # copies too, otherwise duplicate top-level keys make yaml.Unmarshal fail.
+    awk '/^local_broker:/{skip=1; next} /^local_client:/{skip=1; next} /^forwarding:/{skip=1; next} /^[A-Za-z_]+:/{skip=0} !skip' \
       /opt/gateway/config.yml > /opt/gateway/config.yml.new \
       && mv /opt/gateway/config.yml.new /opt/gateway/config.yml
   fi
@@ -524,8 +526,11 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-User=gateway
-Group=gateway
+# root: the agent drives nmcli (WiFi AP / local MQTT), systemctl and the
+# terminal shell directly — an unprivileged unit breaks those commands.
+User=root
+Group=root
+WorkingDirectory=/opt/gateway
 ExecStart=/usr/local/bin/gateway-agent --config /opt/gateway/config.yml
 Restart=always
 RestartSec=10
@@ -640,7 +645,9 @@ configure_mqtt_firewall() {
 # Stage 5 — Start
 # ============================================================================
 start_agent() {
-  systemctl start gateway-agent >> "$LOGFILE" 2>&1 || {
+  # restart (not start): a start on an already-running unit is a no-op and
+  # would leave the agent on the old config/binary.
+  systemctl restart gateway-agent >> "$LOGFILE" 2>&1 || {
     journalctl -u gateway-agent -n 20 --no-pager | tee -a "$LOGFILE"
     err "Start failed — journalctl -u gateway-agent -f"
   }
