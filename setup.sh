@@ -239,10 +239,23 @@ configure() {
   fi
 
   # Auto device ID from MAC
+  local DEVICE_ID_EXPLICIT=0
+  [[ -n "${DEVICE_ID:-}" ]] && DEVICE_ID_EXPLICIT=1
   if [[ -z "${DEVICE_ID:-}" ]]; then
     local MAC
     MAC=$(cat /sys/class/net/eth0/address 2>/dev/null || cat /sys/class/net/wlan0/address 2>/dev/null || echo "unknown")
     DEVICE_ID="gw-$(echo "$MAC" | tr -d ':')"
+  fi
+
+  # The agent pins its ID in /opt/gateway/device.id on first boot and always
+  # reuses it (identity.go), which silently overrides a later --device-id.
+  # An explicitly requested ID wins: re-pin so config and identity agree.
+  if [[ "$DEVICE_ID_EXPLICIT" -eq 1 && -f /opt/gateway/device.id ]]; then
+    local PINNED; PINNED="$(tr -d '[:space:]' < /opt/gateway/device.id)"
+    if [[ -n "$PINNED" && "$PINNED" != "$DEVICE_ID" ]]; then
+      printf '%s\n' "$DEVICE_ID" > /opt/gateway/device.id
+      warn "device.id pin updated: ${PINNED} -> ${DEVICE_ID} (explicit --device-id)"
+    fi
   fi
 
   local IP; IP=$(hostname -I | awk '{print $1}')
@@ -267,6 +280,10 @@ configure() {
 
   # Copy full config template if available, else generate complete config
   if [[ -f "$SCRIPT_DIR/config.yml" ]]; then
+    # Render to a temp file first: when this script runs from /opt/gateway,
+    # $SCRIPT_DIR/config.yml IS /opt/gateway/config.yml — writing straight to
+    # the destination would truncate the template before sed can read it.
+    local TMPCFG; TMPCFG="$(mktemp /opt/gateway/.config.yml.XXXXXX)"
     # Use template as base and override with CLI-provided values.
     # NOTE: keys are anchored (^ + leading whitespace + exact key) so that
     # e.g. the name: pattern never clobbers username: or product_name:.
@@ -279,7 +296,9 @@ configure() {
       -e "s|^\([[:space:]]*\)name:.*|\1name: \"${GW_NAME}\"|" \
       -e "s|^\([[:space:]]*\)provision_token:.*|\1provision_token: \"${TOKEN:-}\"|" \
       -e "s|^\([[:space:]]*\)platform_url:.*|\1platform_url: \"${PLATFORM_URL}\"|" \
-      "$SCRIPT_DIR/config.yml" > /opt/gateway/config.yml
+      "$SCRIPT_DIR/config.yml" > "$TMPCFG"
+    [[ -s "$TMPCFG" ]] || err "config render produced empty file (template: $SCRIPT_DIR/config.yml)"
+    mv "$TMPCFG" /opt/gateway/config.yml
   else
     # Generate complete config from scratch
     cat > /opt/gateway/config.yml << YAML

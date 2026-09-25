@@ -240,11 +240,16 @@ generate_config() {
     WS_URL="${PLATFORM_URL/#http:/ws:}"; WS_URL="${WS_URL/#https:/wss:}"
   fi
 
+  local DEVICE_ID_EXPLICIT=0
+  [[ -n "$DEVICE_ID" ]] && DEVICE_ID_EXPLICIT=1
   [[ -z "$DEVICE_ID" ]] && DEVICE_ID=$(grep -m1 '^Serial' /proc/cpuinfo 2>/dev/null | awk '{print $3}' | tr -d '\0')
   [[ -z "$DEVICE_ID" ]] && DEVICE_ID=$(tr -d '-' </proc/sys/kernel/random/uuid)
   [[ -z "$GW_NAME" ]] && GW_NAME="Gateway $(hostname -I 2>/dev/null | awk '{print $1}')"
 
   [[ -f "$SCRIPT_DIR/config.yml" ]] || err "config.yml template missing in $SCRIPT_DIR"
+  # Temp file first: if this script runs from /opt/gateway, the template IS
+  # $CFG — a direct > $CFG redirect would truncate it before sed reads it.
+  local TMPCFG; TMPCFG="$(mktemp /opt/gateway/.config.yml.XXXXXX)"
   sed \
     -e "s|^\([[:space:]]*\)broker_url:.*|\1broker_url: \"${SERVER}\"|" \
     -e "s|^\([[:space:]]*\)username:.*|\1username: \"${MQTT_USER}\"|" \
@@ -254,7 +259,19 @@ generate_config() {
     -e "s|^\([[:space:]]*\)name:.*|\1name: \"${GW_NAME}\"|" \
     -e "s|^\([[:space:]]*\)provision_token:.*|\1provision_token: \"${TOKEN}\"|" \
     -e "s|^\([[:space:]]*\)platform_url:.*|\1platform_url: \"${PLATFORM_URL}\"|" \
-    "$SCRIPT_DIR/config.yml" > "$CFG"
+    "$SCRIPT_DIR/config.yml" > "$TMPCFG"
+  [[ -s "$TMPCFG" ]] || err "config render produced empty file (template: $SCRIPT_DIR/config.yml)"
+  mv "$TMPCFG" "$CFG"
+
+  # Explicit --device-id must beat the identity pin the agent wrote on first
+  # boot (identity.go always returns the pinned value) — re-pin to agree.
+  if [[ "$DEVICE_ID_EXPLICIT" -eq 1 && -f /opt/gateway/device.id ]]; then
+    local PINNED; PINNED="$(tr -d '[:space:]' < /opt/gateway/device.id)"
+    if [[ -n "$PINNED" && "$PINNED" != "$DEVICE_ID" ]]; then
+      printf '%s\n' "$DEVICE_ID" > /opt/gateway/device.id
+      warn "device.id pin updated: ${PINNED} -> ${DEVICE_ID}"
+    fi
+  fi
 
   # Remote terminal block (only when a one-time secret was issued)
   if [[ -n "$AGENT_SECRET" ]]; then
