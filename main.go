@@ -281,20 +281,34 @@ func main() {
 			// Keep alive for offline queue; reconnect loop inside paho will retry, and provisioning retry below will refresh creds
 		}
 	}
-	// Retry provisioning in background if MQTT unavailable (not configured)
+	// Retry registration (and MQTT) in the background.
+	//
+	// Provisioning must NOT be gated on isConnected(): the agent often holds
+	// static broker credentials, so MQTT connects immediately while the
+	// platform call fails once (flaky WiFi/4G handoff at boot) and the gateway
+	// would otherwise stay PROVISIONING forever with an unused token.
 	go func() {
 		ticker := time.NewTicker(60 * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
-			if !isConnected() && cfg.Gateway.ProvisionToken != "" && cfg.Gateway.PlatformURL != "" {
-				logger.Info("mqtt unavailable: retrying provisioning for credentials")
+			if cfg.Gateway.ProvisionToken == "" || cfg.Gateway.PlatformURL == "" {
+				return
+			}
+			if !provisioningSatisfied() {
+				logger.Info("provisioning: retrying registration with platform")
 				provisionGateway()
+			}
+			if !isConnected() {
 				if err := ValidateMQTTConfig(cfg.MQTT); err == nil {
 					if err := mqttConnect(); err == nil {
 						logger.Info("mqtt: reconnected after provisioning retry")
-						return
 					}
 				}
+			}
+			// Done once registered AND (connected, or registration refused —
+			// stored credentials are all we can use in that case).
+			if provisioningSatisfied() && (isConnected() || provisionState.Load() == 2) {
+				return
 			}
 		}
 	}()

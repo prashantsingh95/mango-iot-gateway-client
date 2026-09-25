@@ -535,8 +535,11 @@ ExecStart=/usr/local/bin/gateway-agent --config /opt/gateway/config.yml
 Restart=always
 RestartSec=10
 LimitNOFILE=65536
-StandardOutput=append:/var/log/gateway-agent.log
-StandardError=append:/var/log/gateway-agent.log
+# journal, not append:/var/log/gateway-agent.log — the agent already writes
+# that file itself (logging.file), so redirecting stdout there too doubles
+# every line. journalctl -u gateway-agent shows stdout.
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target

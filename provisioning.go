@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
@@ -42,8 +44,28 @@ func persistGatewayID(id string) {
 
 // ---------- Provisioning ----------
 
+// provisionHTTPClient bounds the registration call. The default http client
+// has no timeout, so a blackholed route (flaky WiFi/4G handoff) would hang
+// startup forever instead of falling through to the retry loop.
+var provisionHTTPClient = &http.Client{Timeout: 20 * time.Second}
+
+// provisionState tracks registration against the platform. MQTT connecting is
+// NOT a proxy for this: the agent can hold static broker credentials and
+// publish fine while the gateway row is still PROVISIONING and the
+// provisioning token sits unused. Retries must continue until one of these
+// terminal outcomes is reached.
+//
+//	0 = pending (retry)
+//	1 = registered (2xx)
+//	2 = refused (4xx — bad/spent token; retrying cannot help)
+var provisionState atomic.Int32
+
+// provisioningSatisfied reports whether registration should stop being retried.
+func provisioningSatisfied() bool { return provisionState.Load() != 0 }
+
 func provisionGateway() {
 	if cfg.Gateway.ProvisionToken == "" || cfg.Gateway.PlatformURL == "" {
+		provisionState.Store(1)
 		return
 	}
 	body := map[string]interface{}{
@@ -63,7 +85,7 @@ func provisionGateway() {
 	}
 	payload, _ := json.Marshal(body)
 	url := strings.TrimRight(cfg.Gateway.PlatformURL, "/") + "/api/v1/provisioning/gateway"
-	resp, err := http.Post(url, "application/json", strings.NewReader(string(payload)))
+	resp, err := provisionHTTPClient.Post(url, "application/json", strings.NewReader(string(payload)))
 	if err != nil {
 		logger.WithError(err).Warn("provisioning: request failed")
 		return
@@ -71,6 +93,7 @@ func provisionGateway() {
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		provisionState.Store(1)
 		logger.Info("provisioning: gateway registered successfully")
 		// Cache returned deviceSecret/mqtt credentials for later authenticated fetches (integrations, config)
 		var out struct {
@@ -146,6 +169,10 @@ func provisionGateway() {
 		}
 	} else {
 		fields := logrus.Fields{"status": resp.StatusCode, "response": string(raw)}
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			// Definitive rejection (bad/spent token, wrong tenant): stop retrying.
+			provisionState.Store(2)
+		}
 		if resp.StatusCode == 404 {
 			logger.WithFields(fields).Error("provisioning: token invalid or spent (create a fresh token to re-provision); continuing with stored credentials")
 		} else {
