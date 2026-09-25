@@ -22,6 +22,7 @@ SERVICE_NAME="${SERVICE_NAME:-gateway-agent}"
 ENABLE_4G="${ENABLE_4G:-auto}"                # auto | yes | no
 APN="${APN:-}"                                # 4G APN (auto-detected if empty)
 SKIP_DEPS="${SKIP_DEPS:-false}"               # Skip dependency install (for testing)
+SKIP_BUILD="${SKIP_BUILD:-false}"             # Skip Go build (use prebuilt ./gateway-agent binary)
 SKIP_4G_SETUP="${SKIP_4G_SETUP:-false}"       # Skip 4G setup entirely
 FORCE_REINSTALL="${FORCE_REINSTALL:-false}"   # Force reinstall even if exists
 BRANCH="${BRANCH:-main}"                      # Git branch to deploy
@@ -59,6 +60,7 @@ Optional:
   --branch BRANCH     Git branch (default: main)
   --repo-url URL      Git repo URL (default: GitHub)
   --skip-deps         Skip dependency installation
+  --skip-build        Skip Go build (use prebuilt ./gateway-agent binary)
   --skip-4g           Skip 4G setup entirely
   --force             Force reinstall
   -h, --help          Show this help
@@ -103,6 +105,7 @@ parse_args() {
       --branch) BRANCH="$2"; shift 2 ;;
       --repo-url) REPO_URL="$2"; shift 2 ;;
       --skip-deps) SKIP_DEPS="true"; shift ;;
+      --skip-build) SKIP_BUILD="true"; shift ;;
       --skip-4g) SKIP_4G_SETUP="true"; shift ;;
       --force) FORCE_REINSTALL="true"; shift ;;
       -h|--help) usage ;;
@@ -274,6 +277,14 @@ install_deps() {
 # Clone & build agent
 # ─────────────────────────────────────────────────────────────────────────────
 build_agent() {
+  if [[ "$SKIP_BUILD" == "true" ]]; then
+    if [[ -x "$INSTALL_DIR/gateway-agent" ]]; then
+      log "Skipping Go build (--skip-build), using prebuilt binary:"
+      "$INSTALL_DIR/gateway-agent" --version 2>&1 | head -1 || true
+      return
+    fi
+    error "SKIP_BUILD set but no executable $INSTALL_DIR/gateway-agent found — place prebuilt binary there first"
+  fi
   step "Building gateway agent..."
   
   if [[ -d "$INSTALL_DIR/.git" && "$FORCE_REINSTALL" != "true" ]]; then
