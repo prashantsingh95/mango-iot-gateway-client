@@ -55,7 +55,7 @@ Optional:
   --data-dir DIR      Data directory (default: /var/lib/gateway)
   --service-name NAME Systemd service name (default: gateway-agent)
   --4g MODE           4G mode: auto|yes|no (default: auto)
-  --apn APN           4G APN (default: auto-detect)
+  --apn APN           4G APN (default: auto-detect airtel/jio/vi/bsnl; aliases: airtel→airtelgprs.com, jio→jionet, vi→www, bsnl→bsnlnet; or raw APN)
   --branch BRANCH     Git branch (default: main)
   --repo-url URL      Git repo URL (default: GitHub)
   --skip-deps         Skip dependency installation
@@ -461,7 +461,11 @@ setup_4g() {
     log "Running 4G auto-setup script..."
     apn_arg=()
     if [[ -n "${APN:-}" && "${APN}" != "auto" ]]; then
+      # Alias or raw APN: airtel/jio/vi/bsnl or custom (e.g. airtelgprs.com/jionet/www)
       apn_arg=(--apn "$APN")
+    elif [[ "$ENABLE_4G" != "no" && "$SKIP_4G_SETUP" != "true" ]]; then
+      # No APN supplied → auto-detect (airtel→airtelgprs.com, jio→jionet, vi→www, bsnl→bsnlnet)
+      apn_arg=(--apn auto)
     fi
     bash "$INSTALL_DIR/setup-4g-auto.sh" "${apn_arg[@]}" || warn "4G setup had issues (non-fatal)"
   else

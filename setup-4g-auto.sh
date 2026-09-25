@@ -7,15 +7,21 @@
 #   1. Backs up /boot/firmware/config.txt and ensures hat power + UARTs
 #   2. Powers the mPCIe hat via GPIO20/21 (and handles W_DISABLE_N)
 #   3. Fixes Telit SIM slot (AT#SIMDET=1) if needed
-#   4. Creates NetworkManager GSM connection with APN (default: airtelgprs.com)
+#   4. Creates NetworkManager GSM connection with dynamic APN
+#      auto-detects via mmcli/AT (airtel→airtelgprs.com, jio→jionet, vi→www, bsnl→bsnlnet)
+#      or accepts alias: --apn airtel|jio|vi|bsnl|custom
 #   5. Makes 4G the primary default route (metric 50) with autoconnect/retry
 #   6. Verifies: lsusb, mmcli, nmcli, ppp0, ping/curl
 #
 # Usage:
-#   sudo bash setup-4g-auto.sh
-#   sudo bash setup-4g-auto.sh --apn airtelgprs.com
+#   sudo bash setup-4g-auto.sh                         # auto-detect APN (airtel/jio/vi/bsnl)
+#   sudo bash setup-4g-auto.sh --apn airtel            # alias → airtelgprs.com
+#   sudo bash setup-4g-auto.sh --apn jio               # alias → jionet
+#   sudo bash setup-4g-auto.sh --apn vi                # alias → www
+#   sudo bash setup-4g-auto.sh --apn bsnl              # alias → bsnlnet
+#   sudo bash setup-4g-auto.sh --apn airtelgprs.com    # raw APN passthrough
 #   sudo bash setup-4g-auto.sh --apn jionet --reboot
-#   sudo bash setup-4g-auto.sh --apn airtelgprs.com --check-only
+#   sudo bash setup-4g-auto.sh --check-only
 #
 # Tested on: CM4 Rev 1.0, 6.12.109+rpt-rpi-v8, LE910C4-CN 25.20.638, ModemManager 1.20.4
 # Docs: /opt/gateway/docs/4G_FIX_README.md , /usr/local/bin/fix-4g.sh
@@ -39,7 +45,52 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ "$APN" == "auto" ]] && APN="airtelgprs.com"
+# ── Dynamic APN: airtel/jio/vi/bsnl aliases + auto-detect via mmcli/AT ──
+detect_apn() {
+  local op=""
+  # Try ModemManager first (operator name is most reliable)
+  if command -v mmcli >/dev/null 2>&1; then
+    op=$(mmcli -m 0 2>/dev/null | grep -i "operator name" | awk -F: '{print $2}' | tr '[:upper:]' '[:lower:]' | xargs 2>/dev/null || true)
+    if [[ -z "$op" ]]; then
+      # MCCMNC fallback (404xx = India)
+      local mccmnc=$(mmcli -m 0 2>/dev/null | grep -i "operator id" | grep -o "[0-9]\{5,6\}" | head -1 || true)
+      case "$mccmnc" in 4058*|40586*|40587*) op="jio" ;; 404* ) op="" ;; esac
+    fi
+  fi
+  if [[ -z "$op" && -e /dev/ttyUSB2 ]]; then
+    # AT fallback (stop MM briefly if needed)
+    op=$(timeout 4 bash -c 'printf "AT+COPS?\r" > /dev/ttyUSB2 2>/dev/null; sleep 1; cat /dev/ttyUSB2 2>/dev/null' | grep -o '"[^"]*"' | tr -d '"' | tr '[:upper:]' '[:lower:]' | head -1 | xargs || true)
+    if [[ -z "$op" ]]; then
+      op=$(timeout 4 bash -c 'printf "AT+QSPN?\r" > /dev/ttyUSB2 2>/dev/null; sleep 1; cat /dev/ttyUSB2 2>/dev/null' | grep -o '"[^"]*"' | tr -d '"' | tr '[:upper:]' '[:lower:]' | head -1 | xargs || true)
+    fi
+  fi
+  # Normalize operator substring → APN
+  case "$op" in
+    *airtel*) echo "airtelgprs.com" ;;
+    *jio*|*reliance*) echo "jionet" ;;
+    *vi*|*vodafone*|*idea*) echo "www" ;;
+    *bsnl*) echo "bsnlnet" ;;
+    *) echo "airtelgprs.com" ;; # safe fallback (most tested)
+  esac
+}
+normalize_apn() {
+  local a=$(echo "$1" | tr '[:upper:]' '[:lower:]' | xargs)
+  case "$a" in
+    auto) detect_apn ;;
+    airtel|airtelgprs.com) echo "airtelgprs.com" ;;
+    jio|jionet|reliance|reliance_jio) echo "jionet" ;;
+    vi|vodafone|idea|vodafoneidea|www|internet) echo "www" ;;
+    bsnl|bsnlnet) echo "bsnlnet" ;;
+    *) echo "$1" ;; # custom APN passthrough (e.g. private APN)
+  esac
+}
+# Normalize alias (airtel/jio/vi/www) → real APN; auto → detect
+ORIG_APN="$APN"
+APN=$(normalize_apn "$APN")
+if [[ "$ORIG_APN" != "$APN" ]]; then
+  echo "APN $ORIG_APN → $APN"
+fi
+
 [[ $EUID -eq 0 ]] || { echo "Run with sudo: sudo bash $0"; exit 1; }
 [[ $CHECK_ONLY -eq 1 ]] && {
   echo "=== CHECK ONLY ==="
