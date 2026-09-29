@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"math"
+	"net"
 	"os"
 	"os/exec"
 	"strconv"
@@ -28,9 +29,45 @@ type TelemetryData struct {
 	Voltage     float64                `json:"voltage,omitempty"`
 	Battery     float64                `json:"battery,omitempty"`
 	Uptime      int64                  `json:"uptime,omitempty"`
+	CPULoad1    float64                `json:"cpu_load_1,omitempty"`
+	CPULoad5    float64                `json:"cpu_load_5,omitempty"`
+	CPULoad15   float64                `json:"cpu_load_15,omitempty"`
+	NICs        []InterfaceDetail      `json:"nics,omitempty"`
+	IfaceStats  []InterfaceStat        `json:"interface_stats,omitempty"`
+	Peers       []PeerSight            `json:"peers,omitempty"`
+	Processes   []ProcessSight         `json:"processes,omitempty"`
+	Business    map[string]interface{} `json:"business,omitempty"`
 	System      map[string]interface{} `json:"system,omitempty"`
 	Modbus      []ModbusValue          `json:"modbus,omitempty"`
 	GPIO        map[string]interface{} `json:"gpio,omitempty"`
+}
+
+// InterfaceDetail is one NIC row for the platform inventory.
+type InterfaceDetail struct {
+	Name string `json:"name"`
+	MAC  string `json:"mac,omitempty"`
+	IPv4 string `json:"ipv4,omitempty"`
+	IPv6 string `json:"ipv6,omitempty"`
+}
+
+// InterfaceStat carries monotonic byte counters; the platform derives
+// speeds from deltas.
+type InterfaceStat struct {
+	Name string `json:"name"`
+	Rx   uint64 `json:"rx_bytes"`
+	Tx   uint64 `json:"tx_bytes"`
+}
+
+// PeerSight is one neighbor seen on a local link (ARP table).
+type PeerSight struct {
+	ID     string `json:"id"`
+	Signal int    `json:"signal,omitempty"`
+}
+
+// ProcessSight is one supervised-process candidate (top CPU consumers).
+type ProcessSight struct {
+	Name  string `json:"name"`
+	State string `json:"state,omitempty"`
 }
 
 type StatusData struct {
@@ -52,6 +89,12 @@ type StatusData struct {
 	// against desired state to detect drift (revision = unix apply time).
 	ConfigRevision int64  `json:"config_revision"`
 	ConfigHash     string `json:"config_hash"`
+	// Device identity for the platform inventory + fleet map.
+	BoardVendor string  `json:"board_vendor,omitempty"`
+	BoardModel  string  `json:"board_model,omitempty"`
+	ImageName   string  `json:"image_name,omitempty"`
+	GeoLat      float64 `json:"geo_lat,omitempty"`
+	GeoLng      float64 `json:"geo_lng,omitempty"`
 }
 
 // ---------- System Monitoring ----------
@@ -177,8 +220,7 @@ func getCoreVoltage() float64 {
 	return v
 }
 
-func getWiFiSignal() float64 {
-	data, err := os.ReadFile("/proc/net/wireless")
+func getWiFiSignal() float64 {	data, err := os.ReadFile("/proc/net/wireless")
 	if err != nil {
 		return 0
 	}
@@ -197,6 +239,164 @@ func getWiFiSignal() float64 {
 		}
 	}
 	return 0
+}
+
+// toFloatNum coerces numeric readings (modbus/GPIO) to float64 for business
+// telemetry. Non-numeric values are skipped (ok=false).
+func toFloatNum(v interface{}) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, !math.IsNaN(n) && !math.IsInf(n, 0)
+	case float32:
+		return float64(n), true
+	case int:
+		return float64(n), true
+	case int32:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case uint64:
+		return float64(n), true
+	case bool:
+		if n {
+			return 1, true
+		}
+		return 0, true
+	default:
+		return 0, false
+	}
+}
+
+// ---------- Device observation (platform inventory) ----------
+
+// collectInterfaceDetails lists NIC name/MAC/addresses via the stdlib.
+// Loopback is skipped; failures yield an empty list, never an error.
+func collectInterfaceDetails() []InterfaceDetail {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	var out []InterfaceDetail
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+		d := InterfaceDetail{Name: iface.Name, MAC: iface.HardwareAddr.String()}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		var v4, v6 []string
+		for _, a := range addrs {
+			var ip net.IP
+			switch v := a.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip == nil || ip.IsLoopback() {
+				continue
+			}
+			if ip.To4() != nil {
+				v4 = append(v4, a.String())
+			} else {
+				v6 = append(v6, a.String())
+			}
+		}
+		if len(v4) > 0 {
+			d.IPv4 = strings.Join(v4, ",")
+		}
+		if len(v6) > 0 {
+			d.IPv6 = strings.Join(v6, ",")
+		}
+		out = append(out, d)
+		if len(out) >= 16 {
+			break
+		}
+	}
+	return out
+}
+
+// collectInterfaceStats returns per-NIC monotonic byte counters.
+func collectInterfaceStats() []InterfaceStat {
+	io, err := psNet.IOCounters(true)
+	if err != nil {
+		return nil
+	}
+	var out []InterfaceStat
+	for _, c := range io {
+		if c.Name == "lo" {
+			continue
+		}
+		out = append(out, InterfaceStat{Name: c.Name, Rx: c.BytesRecv, Tx: c.BytesSent})
+		if len(out) >= 16 {
+			break
+		}
+	}
+	return out
+}
+
+// collectPeers reads /proc/net/arp: neighbors recently seen on local links.
+// Entries with incomplete (zero) MACs are skipped.
+func collectPeers() []PeerSight {
+	data, err := os.ReadFile("/proc/net/arp")
+	if err != nil {
+		return nil
+	}
+	var out []PeerSight
+	lines := strings.Split(string(data), "\n")
+	for i, line := range lines {
+		if i == 0 {
+			continue // header
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 6 {
+			continue
+		}
+		ip, mac := fields[0], fields[3]
+		if mac == "00:00:00:00:00:00" || net.ParseIP(ip) == nil {
+			continue
+		}
+		out = append(out, PeerSight{ID: ip + " (" + mac + ")"})
+		if len(out) >= 64 {
+			break
+		}
+	}
+	return out
+}
+
+// collectProcesses lists distinct running process names from /proc (capped).
+// The platform matches these against supervised-process watches.
+func collectProcesses() []ProcessSight {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var out []ProcessSight
+	for _, e := range entries {
+		if _, err := strconv.Atoi(e.Name()); err != nil {
+			continue
+		}
+		comm, err := os.ReadFile("/proc/" + e.Name() + "/comm")
+		if err != nil {
+			continue
+		}
+		name := strings.TrimSpace(string(comm))
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, ProcessSight{Name: name, State: "RUNNING"})
+		if len(out) >= 25 {
+			break
+		}
+	}
+	return out
 }
 
 // ---------- Main Loop ----------
@@ -266,6 +466,15 @@ func runTelemetryLoop(ctx context.Context) {
 			if v, ok := sys["battery_percent"].(float64); ok {
 				telemetry.Battery = v
 			}
+			if v, ok := sys["load_1"].(float64); ok {
+				telemetry.CPULoad1 = v
+			}
+			if v, ok := sys["load_5"].(float64); ok {
+				telemetry.CPULoad5 = v
+			}
+			if v, ok := sys["load_15"].(float64); ok {
+				telemetry.CPULoad15 = v
+			}
 
 			if telemetry.CPU > float64(cfg.Monitoring.CPUThresholdWarn) {
 				logger.WithField("cpu", telemetry.CPU).Warn("CPU threshold exceeded")
@@ -279,6 +488,29 @@ func runTelemetryLoop(ctx context.Context) {
 
 			if cfg.Modbus.Enabled && modbusCol != nil {
 				telemetry.Modbus = modbusCol.getAll()
+			}
+
+			// Device observation for the platform inventory (bounded, best-effort).
+			telemetry.NICs = collectInterfaceDetails()
+			telemetry.IfaceStats = collectInterfaceStats()
+			telemetry.Peers = collectPeers()
+			telemetry.Processes = collectProcesses()
+
+			// Business telemetry: numeric application readings (modbus +
+			// numeric GPIO) mirrored under `business` for per-key charts.
+			business := make(map[string]interface{})
+			for _, v := range telemetry.Modbus {
+				if f, ok := toFloatNum(v.Value); ok {
+					business["modbus."+v.Name] = f
+				}
+			}
+			for k, v := range telemetry.GPIO {
+				if f, ok := toFloatNum(v); ok {
+					business["gpio."+k] = f
+				}
+			}
+			if len(business) > 0 {
+				telemetry.Business = business
 			}
 
 			publishTelemetry(telemetry)
@@ -329,6 +561,11 @@ func sendStatus(status string, reason ...string) {
 		OSVersion:      getOSVersion(),
 		ConfigRevision: configRevision,
 		ConfigHash:     configHash,
+		BoardVendor:   getManufacturer(),
+		BoardModel:    getModel(),
+		ImageName:     cfg.Gateway.ImageName,
+		GeoLat:        cfg.Gateway.GeoLat,
+		GeoLng:        cfg.Gateway.GeoLng,
 	}
 	publishStatus(s)
 }

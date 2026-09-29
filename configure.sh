@@ -207,6 +207,8 @@ commands:
     - "update_firmware"
     - "set_relay"
     - "read_register"
+    - "apply_bundle"
+    - "deploy_edge_app"
   shell:
     allowed_paths:
       - "/opt/gateway/scripts/"

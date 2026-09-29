@@ -13,6 +13,9 @@ gateway:
   provision_token: ""              # Set for auto-registration
   platform_url: ""                 # e.g. https://platform.example.com
   offline_path: ""                 # Override offline storage base path (default /data/offline on Linux, config dir otherwise)
+  image_name: "mango-agent"        # Reported as image_name in device inventory
+  geo_lat: 0                       # Optional device coordinates for the fleet map (0 = unset)
+  geo_lng: 0
 
 # White-label / OEM identity (SaaS white-label). Same binary, tenant-driven
 # branding delivered via provisioning. Never change tenant binding locally —
@@ -151,6 +154,8 @@ commands:
     - "forwarding.delete"
     - "forwarding.test"
     - "forwarding.queue"
+    - "apply_bundle"
+    - "deploy_edge_app"
     - "wifi_ap.clients"
     - "wifi_ap.ping_client"
   shell:

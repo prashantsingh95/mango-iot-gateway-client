@@ -243,6 +243,9 @@ type GatewayConfig struct {
 	ProvisionToken string `yaml:"provision_token"`
 	PlatformURL    string `yaml:"platform_url"`
 	OfflinePath    string `yaml:"offline_path"` // override for offline storage base path (default /data/offline on Linux)
+	ImageName      string `yaml:"image_name"`   // reported as image_name (default mango-agent)
+	GeoLat         float64 `yaml:"geo_lat"`     // optional device coordinates for the fleet map
+	GeoLng         float64 `yaml:"geo_lng"`
 }
 
 // BrandingConfig carries tenant/OEM identity (SaaS §22). Configuration-driven —

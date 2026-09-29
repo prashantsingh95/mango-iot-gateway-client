@@ -181,6 +181,10 @@ func handleCommand(client MQTT.Client, msg MQTT.Message) {
 			resp = execLocalMQTT(cmd)
 		case "forwarding.status", "forwarding.destinations", "forwarding.create", "forwarding.update", "forwarding.delete", "forwarding.test", "forwarding.queue":
 			resp = execForwarding(cmd)
+		case "apply_bundle":
+			resp = execApplyBundle(cmd)
+		case "deploy_edge_app":
+			resp = execDeployEdgeApp(cmd)
 		default:
 			resp.Status = "rejected"
 			resp.Error = fmt.Sprintf("unknown command type: %s", cmd.Type)

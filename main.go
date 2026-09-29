@@ -93,6 +93,9 @@ func main() {
 	if cfg.Monitoring.Interval <= 0 {
 		cfg.Monitoring.Interval = 30
 	}
+	if cfg.Gateway.ImageName == "" {
+		cfg.Gateway.ImageName = "mango-agent"
+	}
 	if cfg.MQTT.ClientIDPrefix == "" {
 		cfg.MQTT.ClientIDPrefix = "gw"
 	}
