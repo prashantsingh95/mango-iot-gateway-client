@@ -237,6 +237,9 @@ func execUpdateConfig(cmd CommandRequest) CommandResponse {
 	if err := os.WriteFile(configPath(), data, 0600); err != nil {
 		return CommandResponse{ID: cmd.ID, Status: "failed", Error: err.Error(), Timestamp: time.Now().UTC().Format(time.RFC3339)}
 	}
+	// The platform tracks config drift by applied revision — a successful
+	// remote apply must advance it, or every device reads permanently drifted.
+	stampConfigRevision()
 	return CommandResponse{ID: cmd.ID, Status: "completed", Result: "config updated, restart agent to apply", Timestamp: time.Now().UTC().Format(time.RFC3339)}
 }
 

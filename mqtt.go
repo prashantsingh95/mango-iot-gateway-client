@@ -183,6 +183,10 @@ func publishLog(level, msg string, fields map[string]interface{}) {
 	for k, v := range fields {
 		entry[k] = v
 	}
+	// The platform routes multi-file logs by top-level source (log taps).
+	if src, ok := fields["source"]; ok {
+		entry["source"] = src
+	}
 	payload, _ := json.Marshal(entry)
 	enqueuePublish("log", topic, 0, false, payload, 1, newEventID())
 }

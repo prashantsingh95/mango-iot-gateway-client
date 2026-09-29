@@ -342,6 +342,7 @@ func main() {
 	go startWatchdog(ctx)
 	go runSpoolFlushLoop(ctx)
 	go startIntegrationPoller(ctx)
+	go startDesiresPoller(ctx)
 
 	// Reverse-connection terminal agent (optional). Overlaps with the
 	// Cloudflare tunnel below (both give remote shell); enabling both is
