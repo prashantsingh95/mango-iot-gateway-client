@@ -63,10 +63,16 @@ func fetchDesires() {
 		return
 	}
 	deviceID := getDeviceID()
-	base := strings.TrimRight(cfg.Gateway.PlatformURL, "/")
+	base, _ := splitEdgeAuth(strings.TrimRight(cfg.Gateway.PlatformURL, "/"))
 	url := fmt.Sprintf("%s/api/v1/provisioning/config?deviceId=%s&deviceSecret=%s", base, deviceID, secret)
 	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(url)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		logger.WithError(err).Warn("desires: fetch failed")
+		return
+	}
+	applyEdgeAuth(req, cfg.Gateway.PlatformURL)
+	resp, err := client.Do(req)
 	if err != nil {
 		logger.WithError(err).Warn("desires: fetch failed")
 		return

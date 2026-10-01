@@ -122,6 +122,17 @@ type WatchdogConfig struct {
 	Action         string `yaml:"action"`
 }
 
+// ModemWatchdogConfig watches the cellular data path at runtime and
+// self-heals (re-dial -> ModemManager restart -> GPIO power-cycle ->
+// optional reboot). See modem_watchdog.go.
+type ModemWatchdogConfig struct {
+	Enabled         bool     `yaml:"enabled"`
+	IntervalSec     int      `yaml:"interval_sec"`
+	PingTargets     []string `yaml:"ping_targets"`
+	PowerCycle      bool     `yaml:"power_cycle"`
+	RebootOnFailure bool     `yaml:"reboot_on_failure"`
+}
+
 type ShellCommandConfig struct {
 	AllowedPaths []string `yaml:"allowed_paths"`
 	Timeout      int      `yaml:"timeout"`
@@ -242,6 +253,7 @@ type GatewayConfig struct {
 	TenantID       string `yaml:"tenant_id"`
 	ProvisionToken string `yaml:"provision_token"`
 	PlatformURL    string `yaml:"platform_url"`
+	APIKey         string `yaml:"api_key"` // edge API key, sent as X-API-Key on platform REST (never logged)
 	OfflinePath    string `yaml:"offline_path"` // override for offline storage base path (default /data/offline on Linux)
 	ImageName      string `yaml:"image_name"`   // reported as image_name (default mango-agent)
 	GeoLat         float64 `yaml:"geo_lat"`     // optional device coordinates for the fleet map
@@ -273,6 +285,7 @@ type Config struct {
 	Logging     LogConfig              `yaml:"logging"`
 	OTA         OTAConfig              `yaml:"ota"`
 	Watchdog    WatchdogConfig         `yaml:"watchdog"`
+	ModemWatchdog ModemWatchdogConfig   `yaml:"modem_watchdog"`
 	Commands    CommandsConfig         `yaml:"commands"`
 	WifiAP      WifiAPConfig           `yaml:"wifi_ap"`
 	Terminal    TerminalConfig         `yaml:"terminal"`

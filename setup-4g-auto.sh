@@ -107,8 +107,9 @@ echo "=== 1/6 Backup and boot config ==="
 CONFIG="/boot/firmware/config.txt"
 if [[ ! -f "$CONFIG" ]]; then CONFIG="/boot/config.txt"; fi
 sudo cp -v "$CONFIG" "${CONFIG}.bak.$(date +%s)" 2>&1 || true
-# Ensure hat power persists after reboot
-for line in "gpio=20=op,dh" "gpio=21=op,dh" "enable_uart=1" "dtoverlay=miniuart-bt" "dtoverlay=uart2" "dtoverlay=uart3" "dtoverlay=uart4" "dtoverlay=uart5"; do
+# Ensure hat power persists after reboot (GPIO22 found by scan Oct-2026:
+# modem enumerates only with 22 high; GPIO6 low = W_DISABLE off)
+for line in "gpio=20=op,dh" "gpio=21=op,dh" "gpio=22=op,dh" "gpio=6=ip,pd" "enable_uart=1" "dtoverlay=miniuart-bt" "dtoverlay=uart2" "dtoverlay=uart3" "dtoverlay=uart4" "dtoverlay=uart5"; do
   grep -qF "$line" "$CONFIG" || echo "$line" | sudo tee -a "$CONFIG" >/dev/null
 done
 # Ensure XHCI host for CM4
@@ -118,10 +119,11 @@ fi
 echo "Boot config ready: $CONFIG"
 grep -E "gpio=|enable_uart|dtoverlay=uart|otg_mode" "$CONFIG" 2>&1 | tail -n 20 || true
 
-echo "=== 2/6 Power hat (GPIO20/21) ==="
+echo "=== 2/6 Power hat (GPIO20/21/22 + W_DISABLE off) ==="
 if command -v raspi-gpio >/dev/null 2>&1; then
   sudo raspi-gpio set 20 op dh 2>&1 || true
   sudo raspi-gpio set 21 op dh 2>&1 || true
+  sudo raspi-gpio set 22 op dh 2>&1 || true
   # W_DISABLE_N off (GPIO6 low = enabled)
   sudo raspi-gpio set 6 ip pd 2>&1 || true
   sleep 8
@@ -199,10 +201,12 @@ set -e
 # Fix 4G after reboot — waits for modem, ensures SIMDET and NM connection up
 CONN="airtel"
 IFACE="ttyUSB2"
-for i in 1 2 3 4 5 6 7 8 9 10; do
-  # Power hat early (if raspi-gpio exists)
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  # Power hat early + W_DISABLE off (GPIO6 low = enabled, GPIO22 required)
+  raspi-gpio set 6 ip pd 2>/dev/null || true
   raspi-gpio set 20 op dh 2>/dev/null || true
   raspi-gpio set 21 op dh 2>/dev/null || true
+  raspi-gpio set 22 op dh 2>/dev/null || true
   if ls /dev/ttyUSB2 >/dev/null 2>&1; then break; fi
   echo "[fix-4g] waiting for $IFACE ... $i"
   sleep 3
@@ -244,7 +248,7 @@ Wants=network-online.target
 Type=oneshot
 ExecStart=/usr/local/bin/fix-4g.sh
 RemainAfterExit=yes
-TimeoutStartSec=120
+TimeoutStartSec=180
 
 [Install]
 WantedBy=multi-user.target

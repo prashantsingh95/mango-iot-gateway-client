@@ -84,8 +84,16 @@ func provisionGateway() {
 		},
 	}
 	payload, _ := json.Marshal(body)
-	url := strings.TrimRight(cfg.Gateway.PlatformURL, "/") + "/api/v1/provisioning/gateway"
-	resp, err := provisionHTTPClient.Post(url, "application/json", strings.NewReader(string(payload)))
+	base, _ := splitEdgeAuth(strings.TrimRight(cfg.Gateway.PlatformURL, "/"))
+	url := base + "/api/v1/provisioning/gateway"
+	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(string(payload)))
+	if err != nil {
+		logger.WithError(err).Warn("provisioning: request failed")
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	applyEdgeAuth(req, cfg.Gateway.PlatformURL)
+	resp, err := provisionHTTPClient.Do(req)
 	if err != nil {
 		logger.WithError(err).Warn("provisioning: request failed")
 		return

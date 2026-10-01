@@ -46,6 +46,7 @@ TOKEN=""
 DEVICE_ID=""
 GW_NAME=""
 PLATFORM_URL=""
+API_KEY=""
 TENANT_ID="default"
 
 # ============================================================================
@@ -61,6 +62,7 @@ parse_args() {
       --device-id)  DEVICE_ID="$2"; shift 2 ;;
       --name)       GW_NAME="$2"; shift 2 ;;
       --platform-url) PLATFORM_URL="$2"; shift 2 ;;
+      --api-key) API_KEY="$2"; shift 2 ;;
       --output)     OUTPUT="$2"; shift 2 ;;
       --help|-h)
         echo "Usage: bash configure.sh [options]"
@@ -136,6 +138,7 @@ gateway:
   tenant_id: "${TENANT_ID}"
   provision_token: "${TOKEN:-}"
   platform_url: "${PLATFORM_URL:-}"
+  api_key: "${API_KEY:-}"
 
 mqtt:
   broker_url: "${SERVER}"

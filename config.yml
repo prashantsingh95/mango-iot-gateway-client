@@ -12,6 +12,7 @@ gateway:
   tenant_id: "default"
   provision_token: ""              # Set for auto-registration
   platform_url: ""                 # e.g. https://platform.example.com
+  api_key: ""                      # Edge API key, sent as X-API-Key (backend EDGE_API_KEY)
   offline_path: ""                 # Override offline storage base path (default /data/offline on Linux, config dir otherwise)
   image_name: "mango-agent"        # Reported as image_name in device inventory
   geo_lat: 0                       # Optional device coordinates for the fleet map (0 = unset)
@@ -124,6 +125,13 @@ watchdog:
   interval: 60                     # Seconds between health checks
   max_missed_pings: 3
   action: "restart"                # restart, reboot, or custom command
+
+modem_watchdog:
+  enabled: true
+  interval_sec: 60                 # Seconds between data-path checks
+  ping_targets: ["8.8.8.8", "1.1.1.1"]
+  power_cycle: true                # GPIO power-cycle hat when link is dead
+  reboot_on_failure: false         # reboot after ~10 min outage (else retry forever)
 
 commands:
   enabled: true

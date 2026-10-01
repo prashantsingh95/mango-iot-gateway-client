@@ -80,6 +80,7 @@ parse_args() {
       --device-id)  DEVICE_ID="$2"; shift 2 ;;
       --name)       GW_NAME="$2"; shift 2 ;;
       --platform-url) PLATFORM_URL="$2"; shift 2 ;;
+      --api-key) API_KEY="$2"; shift 2 ;;
       --agent-secret) AGENT_SECRET="$2"; shift 2 ;;
       --ws-url) WS_URL="$2"; shift 2 ;;
       --signing-pepper) SIGNING_PEPPER="$2"; shift 2 ;;
@@ -98,6 +99,7 @@ parse_args() {
         echo "  --device-id ID      Unique device ID (auto from MAC if not set)"
         echo "  --name NAME         Human-readable name"
         echo "  --platform-url URL  Platform API URL (required for provisioning)"
+        echo "  --api-key KEY       Edge API key, sent as X-API-Key (backend EDGE_API_KEY)"
         echo "  --agent-secret SEC  One-time terminal agent secret (enables remote terminal)"
         echo "  --ws-url URL        Backend WS URL (default: derived from --platform-url)"
         echo "  --signing-pepper P  Must match backend TERMINAL_SIGNING_PEPPER"
@@ -296,6 +298,7 @@ configure() {
       -e "s|^\([[:space:]]*\)name:.*|\1name: \"${GW_NAME}\"|" \
       -e "s|^\([[:space:]]*\)provision_token:.*|\1provision_token: \"${TOKEN:-}\"|" \
       -e "s|^\([[:space:]]*\)platform_url:.*|\1platform_url: \"${PLATFORM_URL}\"|" \
+      -e "s|^\([[:space:]]*\)api_key:.*|\1api_key: \"${API_KEY:-}\"|" \
       "$SCRIPT_DIR/config.yml" > "$TMPCFG"
     [[ -s "$TMPCFG" ]] || err "config render produced empty file (template: $SCRIPT_DIR/config.yml)"
     mv "$TMPCFG" /opt/gateway/config.yml
@@ -308,6 +311,7 @@ gateway:
   tenant_id: "default"
   provision_token: "${TOKEN:-}"
   platform_url: ""
+  api_key: "${API_KEY:-}"
 
 mqtt:
   broker_url: "${SERVER}"

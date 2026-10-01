@@ -11,6 +11,7 @@ set -euo pipefail
 # Config (override via flags/env)
 # ─────────────────────────────────────────────────────────────────────────────
 PLATFORM_URL="${PLATFORM_URL:-}"
+API_KEY="${API_KEY:-}"                          # Edge API key, sent as X-API-Key (backend EDGE_API_KEY)
 PROVISION_TOKEN="${PROVISION_TOKEN:-}"
 DEVICE_ID="${DEVICE_ID:-}"                    # Optional: set fixed device ID
 SERIAL_NUMBER="${SERIAL_NUMBER:-}"            # Optional: override serial
@@ -47,6 +48,7 @@ One-command deployment for Mango IoT Gateway Agent on Raspberry Pi 3/4.
 Required:
   --token TOKEN       Provisioning token from platform
   --url URL           Platform URL (e.g., https://gateway.example.com)
+  --api-key KEY       Edge API key, sent as X-API-Key (backend EDGE_API_KEY)
 
 Optional:
   --device-id ID      Fixed device ID (default: auto-generated from CPU serial)
@@ -66,7 +68,7 @@ Optional:
   -h, --help          Show this help
 
 Environment variables (alternative to flags):
-  PLATFORM_URL, PROVISION_TOKEN, DEVICE_ID, SERIAL_NUMBER, INSTALL_DIR,
+  PLATFORM_URL, PROVISION_TOKEN, API_KEY, DEVICE_ID, SERIAL_NUMBER, INSTALL_DIR,
   CONFIG_DIR, DATA_DIR, LOG_DIR, SERVICE_NAME, ENABLE_4G, APN, SKIP_DEPS,
   SKIP_4G_SETUP, FORCE_REINSTALL, BRANCH, REPO_URL
 
@@ -93,6 +95,7 @@ parse_args() {
     case $1 in
       --token) PROVISION_TOKEN="$2"; shift 2 ;;
       --url) PLATFORM_URL="$2"; shift 2 ;;
+      --api-key) API_KEY="$2"; shift 2 ;;
       --device-id) DEVICE_ID="$2"; shift 2 ;;
       --serial) SERIAL_NUMBER="$2"; shift 2 ;;
       --install-dir) INSTALL_DIR="$2"; shift 2 ;;
@@ -331,6 +334,7 @@ gateway:
   device_id: "$DEVICE_ID"
   serial_number: "$SERIAL_NUMBER"
   platform_url: "$PLATFORM_URL"
+  api_key: "$API_KEY"
   provision_token: "$PROVISION_TOKEN"
   offline_path: "/data/offline"
 

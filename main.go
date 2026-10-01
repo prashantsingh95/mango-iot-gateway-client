@@ -340,6 +340,7 @@ func main() {
 	go runTelemetryLoop(ctx)
 	go runModbusLoop(ctx)
 	go startWatchdog(ctx)
+	go startModemWatchdog(ctx)
 	go runSpoolFlushLoop(ctx)
 	go startIntegrationPoller(ctx)
 	go startDesiresPoller(ctx)

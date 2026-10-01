@@ -122,7 +122,11 @@ func (a *terminalAgent) connect(ctx context.Context) error {
 		logger.Error("terminal agent: TLS verification DISABLED (insecure_skip_verify) — test use only")
 		dialer.TLSClientConfig = tlsConfigInsecure()
 	}
-	conn, _, err := dialer.Dial(a.wsURL(), nil)
+	// Edge protection (ngrok --basic-auth): credentials travel in the config
+	// URL userinfo but must not be dialled literally — strip them and send
+	// as an Authorization header instead (never logged).
+	dialURL, authHeader := splitEdgeAuth(a.wsURL())
+	conn, _, err := dialer.Dial(dialURL, authHeader)
 	if err != nil {
 		return err
 	}
@@ -130,7 +134,7 @@ func (a *terminalAgent) connect(ctx context.Context) error {
 	a.conn = conn
 	a.mu.Unlock()
 
-	logger.WithField("url", a.wsURL()).Info("terminal agent: connected to backend")
+	logger.WithField("url", stripEdgeAuth(a.wsURL())).Info("terminal agent: connected to backend")
 
 	a.mu.Lock()
 	a.connGen++

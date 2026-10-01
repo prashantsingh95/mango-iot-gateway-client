@@ -48,13 +48,21 @@ func fetchAndApplyIntegrations() {
 		logger.Debug("integrations: no device secret cached, skipping fetch")
 		return
 	}
-	url := strings.TrimRight(cfg.Gateway.PlatformURL, "/") + "/api/v1/integrations/gateway/config"
+	base, _ := splitEdgeAuth(strings.TrimRight(cfg.Gateway.PlatformURL, "/"))
+	url := base + "/api/v1/integrations/gateway/config"
 	reqBody, _ := json.Marshal(map[string]string{
 		"deviceId":     deviceID,
 		"deviceSecret": secret,
 	})
 	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Post(url, "application/json", bytes.NewReader(reqBody))
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(reqBody))
+	if err != nil {
+		logger.WithError(err).Warn("integrations: fetch failed")
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	applyEdgeAuth(req, cfg.Gateway.PlatformURL)
+	resp, err := client.Do(req)
 	if err != nil {
 		logger.WithError(err).Warn("integrations: fetch failed")
 		return

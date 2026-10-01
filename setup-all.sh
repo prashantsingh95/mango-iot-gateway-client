@@ -59,7 +59,7 @@ usage() { sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
 
 # ── Args ─────────────────────────────────────────────────────────────────────
 SERVER=""; MQTT_USER=""; MQTT_PASS=""; MQTT_SSL=""
-TOKEN=""; PLATFORM_URL=""; DEVICE_ID=""; GW_NAME=""
+TOKEN=""; PLATFORM_URL=""; API_KEY=""; DEVICE_ID=""; GW_NAME=""
 AGENT_SECRET=""; WS_URL=""; SIGNING_PEPPER=""; TERMINAL_SHELL="/bin/bash"
 LOCAL_MQTT_MODE="disabled"; NO_FIREWALL=""
 APN="auto"; FOUR_G="auto"; NO_REBOOT=0; FORCE_CONFIG=0; SKIP_BUILD=""
@@ -75,6 +75,7 @@ parse_args() {
       --mqtt-ssl)       MQTT_SSL="$2"; shift 2 ;;
       --token)          TOKEN="$2"; shift 2 ;;
       --platform-url)   PLATFORM_URL="$2"; shift 2 ;;
+      --api-key)        API_KEY="$2"; shift 2 ;;
       --device-id)      DEVICE_ID="$2"; shift 2 ;;
       --name)           GW_NAME="$2"; shift 2 ;;
       --agent-secret)   AGENT_SECRET="$2"; shift 2 ;;
@@ -108,6 +109,7 @@ SCRIPT_DIR='$SCRIPT_DIR'
 APN='$APN'
 FOUR_G='$FOUR_G'
 PLATFORM_URL='$PLATFORM_URL'
+API_KEY='$API_KEY'
 EOF
   chmod 600 "$ARGS_FILE"
 }
@@ -259,6 +261,7 @@ generate_config() {
     -e "s|^\([[:space:]]*\)name:.*|\1name: \"${GW_NAME}\"|" \
     -e "s|^\([[:space:]]*\)provision_token:.*|\1provision_token: \"${TOKEN}\"|" \
     -e "s|^\([[:space:]]*\)platform_url:.*|\1platform_url: \"${PLATFORM_URL}\"|" \
+    -e "s|^\([[:space:]]*\)api_key:.*|\1api_key: \"${API_KEY:-}\"|" \
     "$SCRIPT_DIR/config.yml" > "$TMPCFG"
   [[ -s "$TMPCFG" ]] || err "config render produced empty file (template: $SCRIPT_DIR/config.yml)"
   mv "$TMPCFG" "$CFG"
